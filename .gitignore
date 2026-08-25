@@ -1,0 +1,30 @@
+# Local CMake/build output
+/build/
+/build-32/
+/build-32-static/
+/cmake-build-*/
+/out/
+/dist/
+/artifact/
+/plugins/
+
+# Local dependency and integration-test copies
+/dependencies/
+/test-run-*/
+
+# Generated Pawn include output (generated into each build tree)
+/pawno/
+
+# IDE and editor state
+.cache/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Windows download metadata
+*:Zone.Identifier
+
+# Local logs and crash dumps
+*.log
+*.dmp

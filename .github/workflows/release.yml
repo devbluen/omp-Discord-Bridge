@@ -1,0 +1,206 @@
+name: Release Discord Bridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Base version (for example, 1.0.0 or 1.1.0)"
+        required: true
+        type: string
+        default: "1.0.0"
+      release_type:
+        description: "Release type"
+        required: true
+        type: choice
+        options:
+          - beta
+          - release-candidate
+          - stable
+          - security
+        default: beta
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-version:
+    name: Prepare release version
+    runs-on: ubuntu-latest
+    outputs:
+      build_version: ${{ steps.vars.outputs.build_version }}
+      build_number: ${{ steps.vars.outputs.build_number }}
+      tag_name: ${{ steps.vars.outputs.tag_name }}
+      release_name: ${{ steps.vars.outputs.release_name }}
+      base_version: ${{ steps.vars.outputs.base_version }}
+      release_type: ${{ steps.vars.outputs.release_type }}
+      is_prerelease: ${{ steps.vars.outputs.is_prerelease }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate version
+        id: vars
+        shell: bash
+        env:
+          BASE_VERSION: ${{ inputs.version }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$BASE_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "version must use MAJOR.MINOR or MAJOR.MINOR.PATCH format" >&2
+            exit 1
+          fi
+
+          IFS=. read -r major minor _ <<< "$BASE_VERSION"
+          major_minor="${major}.${minor}"
+          build_number="$(git rev-list --count HEAD)"
+          build_version="${major_minor}.${build_number}"
+          tag_name="v${build_version}"
+
+          if git rev-parse --verify --quiet "refs/tags/${tag_name}" >/dev/null; then
+            echo "release tag ${tag_name} already exists" >&2
+            exit 1
+          fi
+
+          case "$RELEASE_TYPE" in
+            stable)
+              release_name="$tag_name"
+              is_prerelease=false
+              ;;
+            security)
+              release_name="Security Update ${tag_name}"
+              is_prerelease=false
+              ;;
+            beta)
+              release_name="Beta ${tag_name}"
+              is_prerelease=true
+              ;;
+            release-candidate)
+              release_name="RC ${tag_name}"
+              is_prerelease=true
+              ;;
+            *)
+              echo "unsupported release type: ${RELEASE_TYPE}" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "build_version=${build_version}"
+            echo "build_number=${build_number}"
+            echo "tag_name=${tag_name}"
+            echo "release_name=${release_name}"
+            echo "base_version=${BASE_VERSION}"
+            echo "release_type=${RELEASE_TYPE}"
+            echo "is_prerelease=${is_prerelease}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Building ${build_version} (${RELEASE_TYPE})"
+
+  build:
+    name: Build release artifacts
+    needs: prepare-version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.prepare-version.outputs.build_version }}
+    permissions:
+      contents: read
+
+  create-release:
+    name: Publish GitHub release
+    needs: [prepare-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-files
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) \
+            -exec cp {} release-files/ \;
+
+          if ! find release-files -type f -print -quit | grep -q .; then
+            echo "No release artifacts were downloaded" >&2
+            exit 1
+          fi
+
+          find release-files -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Generate release notes
+        shell: bash
+        env:
+          BASE_VERSION: ${{ needs.prepare-version.outputs.base_version }}
+          BUILD_VERSION: ${{ needs.prepare-version.outputs.build_version }}
+          RELEASE_TYPE: ${{ needs.prepare-version.outputs.release_type }}
+        run: |
+          set -euo pipefail
+
+          previous_tag="$(git tag --sort=-version:refname | head -n 1 || true)"
+          if [[ -n "$previous_tag" ]]; then
+            changelog="$(git log "${previous_tag}..HEAD" --pretty=format:'- %s (%h)' --no-merges || true)"
+          else
+            changelog="$(git log --pretty=format:'- %s (%h)' --no-merges || true)"
+          fi
+          if [[ -z "$changelog" ]]; then
+            changelog='- Initial release'
+          fi
+
+          {
+            echo "## Discord Bridge ${BUILD_VERSION}"
+            echo
+            echo "Release type: ${RELEASE_TYPE}"
+            echo
+            echo "### Installation"
+            echo
+            echo '1. Download the archive for the target platform.'
+            echo '2. Copy the contents of `components/` into `components/` for open.mp, or into `plugins/` for SA-MP.'
+            echo '3. Copy the files in `include/` into the server Pawn include directory.'
+            echo '4. The binary is the same for both loaders; only the server architecture must match.'
+            echo
+            echo 'The Linux `static` packages include OpenSSL and are the simplest deployment option.'
+            echo 'The Linux `dynssl` packages require compatible OpenSSL runtime libraries on the server.'
+            echo
+            echo '### Changes'
+            echo
+            printf '%s\n' "$changelog"
+            echo
+            echo "Base version: ${BASE_VERSION}"
+            echo "Repository: https://github.com/${GITHUB_REPOSITORY}"
+          } > release-notes.md
+
+      - name: Publish release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.prepare-version.outputs.tag_name }}
+          RELEASE_NAME: ${{ needs.prepare-version.outputs.release_name }}
+          IS_PRERELEASE: ${{ needs.prepare-version.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          release_args=(
+            "$TAG_NAME"
+            --title "$RELEASE_NAME"
+            --notes-file release-notes.md
+            --latest
+          )
+          if [[ "$IS_PRERELEASE" == true ]]; then
+            release_args+=(--prerelease)
+          fi
+
+          gh release create "${release_args[@]}" release-files/*

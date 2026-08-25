@@ -1,0 +1,356 @@
+name: Build Discord Bridge
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to embed in a manual build"
+        required: false
+        type: string
+        default: "1.0.0"
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to embed in the build artifacts"
+        required: false
+        type: string
+        default: "1.0.0"
+
+permissions:
+  contents: read
+
+env:
+  BUILD_TYPE: RelWithDebInfo
+  RELEASE_VERSION: ${{ inputs.version || '1.0.0' }}
+
+jobs:
+  build-linux:
+    name: Linux ${{ matrix.arch }} (${{ matrix.ssl }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+        ssl: [static, dynssl]
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ matrix.arch }}" == "x86" ]]; then
+            sudo dpkg --add-architecture i386
+          fi
+
+          sudo apt-get update
+          packages=(
+            build-essential
+            cmake
+            ninja-build
+            pkg-config
+          )
+
+          if [[ "${{ matrix.arch }}" == "x86" ]]; then
+            packages+=(
+              gcc-multilib
+              g++-multilib
+              libboost-system1.74-dev:i386
+              libssl-dev:i386
+            )
+          else
+            packages+=(
+              libboost-system1.74-dev
+              libssl-dev
+            )
+          fi
+
+          sudo apt-get install -y "${packages[@]}"
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          arch_args=()
+          if [[ "${{ matrix.arch }}" == "x86" ]]; then
+            arch_args+=("-DDCC_BUILD_32BIT=ON")
+          else
+            arch_args+=("-DDCC_BUILD_32BIT=OFF")
+          fi
+
+          ssl_args=()
+          if [[ "${{ matrix.ssl }}" == "static" ]]; then
+            ssl_args+=("-DDCC_STATIC_DEPS=ON")
+          else
+            ssl_args+=("-DDCC_STATIC_DEPS=OFF")
+            if [[ "${{ matrix.arch }}" == "x86" ]]; then
+              # FindOpenSSL can otherwise consume the host's amd64
+              # pkg-config result even though the compiler is running with
+              # -m32.  Pin the dynamic libraries to the architecture that
+              # this job is actually producing.
+              ssl_args+=(
+                "-DOPENSSL_INCLUDE_DIR=/usr/include"
+                "-DOPENSSL_SSL_LIBRARY=/usr/lib/i386-linux-gnu/libssl.so"
+                "-DOPENSSL_CRYPTO_LIBRARY=/usr/lib/i386-linux-gnu/libcrypto.so"
+              )
+            fi
+          fi
+
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DDCC_VERSION="$RELEASE_VERSION" \
+            -DDCC_OMP_SDK_DIR="$GITHUB_WORKSPACE/omp-sdk" \
+            "${arch_args[@]}" \
+            "${ssl_args[@]}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Verify component ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          plugin="build/plugins/discord-bridge.so"
+
+          test -f "$plugin"
+          file "$plugin"
+          nm -D "$plugin" | grep -q 'ComponentEntryPoint'
+          nm -D "$plugin" | grep -q 'Supports'
+
+          if [[ "${{ matrix.ssl }}" == "static" ]]; then
+            if readelf -d "$plugin" | grep -Eq 'libboost_system|libssl|libcrypto'; then
+              echo "Static build unexpectedly has a dynamic Boost/OpenSSL dependency"
+              exit 1
+            fi
+          else
+            for dependency in libssl libcrypto; do
+              if ! readelf -d "$plugin" | grep -q "$dependency"; then
+                echo "Dynamic build is missing $dependency"
+                exit 1
+              fi
+            done
+
+            # Boost.System is header-only for the code paths used by this
+            # component with current Boost releases. If the linker records
+            # it as a runtime dependency, the staged copy must be present;
+            # otherwise there is no Boost.System runtime to package.
+            if readelf -d "$plugin" | grep -q 'libboost_system'; then
+              if ! find build/plugins -maxdepth 1 -type f -name 'libboost_system.so*' -print -quit | grep -q .; then
+                echo "Dynamic build records libboost_system but it was not staged beside the plugin"
+                exit 1
+              fi
+            fi
+          fi
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          plugin="build/plugins/discord-bridge.so"
+          package_dir="package"
+          artifact="artifacts/discord-bridge-linux-${{ matrix.arch }}-${{ matrix.ssl }}-${RELEASE_VERSION}.tar.gz"
+
+          test -f "$plugin"
+          mkdir -p "$package_dir/components" "$package_dir/include" artifacts
+          cp "$plugin" "$package_dir/components/"
+
+          # The CMake project copies the dynamically linked Boost.System library
+          # beside the plugin so the package can be deployed as a unit.
+          find build/plugins -maxdepth 1 -type f -name 'libboost_system.so*' \
+            -exec cp -P {} "$package_dir/components/" \;
+
+          cp build/pawno/include/discord-bridge.inc "$package_dir/include/"
+          cp build/pawno/include/discord-dcc-compat.inc "$package_dir/include/"
+          cp build/pawno/include/discord-connector.inc "$package_dir/include/"
+
+          tar -czf "$artifact" -C "$package_dir" .
+          sha256sum "$artifact" > "$artifact.sha256"
+
+          tar -tzf "$artifact"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-bridge-linux-${{ matrix.arch }}-${{ matrix.ssl }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    name: Windows ${{ matrix.arch }}
+    # Pin the image because windows-latest can move to a runner image without
+    # the Visual Studio 17 installation required by the generator below.
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            cmake_arch: x64
+            triplet: x64-windows-static
+          - arch: x86
+            cmake_arch: Win32
+            triplet: x86-windows-static
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: vcpkg
+          persist-credentials: false
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          & .\vcpkg\bootstrap-vcpkg.bat
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify Visual Studio toolchain
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe was not found on the Windows runner"
+          }
+
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vsPath) {
+            throw "A Visual Studio installation with C++ tools was not found"
+          }
+          Write-Host "Using Visual Studio at $vsPath"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          $triplet = "${{ matrix.triplet }}"
+          & .\vcpkg\vcpkg.exe install `
+            "boost-system:$triplet" `
+            "boost-asio[ssl]:$triplet" `
+            "boost-beast:$triplet" `
+            "openssl:$triplet" `
+            --triplet $triplet
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $toolchain = "$env:GITHUB_WORKSPACE\vcpkg\scripts\buildsystems\vcpkg.cmake"
+          $ompSdk = "$env:GITHUB_WORKSPACE\omp-sdk"
+
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -A "${{ matrix.cmake_arch }}" `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" `
+            -DDCC_VERSION="$env:RELEASE_VERSION" `
+            -DDCC_OMP_SDK_DIR="$ompSdk" `
+            -DDCC_STATIC_DEPS=ON
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build --config $env:BUILD_TYPE --parallel
+
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build -C $env:BUILD_TYPE --output-on-failure
+
+      - name: Verify component ABI
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path build -Recurse -Filter discord-bridge.dll |
+            Where-Object { $_.FullName -match '[\\/]plugins[\\/]' } |
+            Select-Object -First 1
+
+          if (-not $dll) {
+            throw "discord-bridge.dll was not produced"
+          }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          $dumpbin = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse `
+            -Filter dumpbin.exe |
+            Where-Object { $_.FullName -match '\\bin\\Hostx64\\x64\\dumpbin\.exe$' } |
+            Select-Object -First 1
+
+          if (-not $dumpbin) {
+            throw "dumpbin.exe was not found"
+          }
+
+          $exports = & $dumpbin.FullName /exports $dll.FullName | Out-String
+          if ($exports -notmatch "ComponentEntryPoint") {
+            throw "ComponentEntryPoint is not exported by $($dll.FullName)"
+          }
+          if ($exports -notmatch "Supports") {
+            throw "Supports is not exported by $($dll.FullName)"
+          }
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path build -Recurse -Filter discord-bridge.dll |
+            Where-Object { $_.FullName -match '[\\/]plugins[\\/]' } |
+            Select-Object -First 1
+          $pdb = Get-ChildItem -Path build -Recurse -Filter discord-bridge.pdb |
+            Where-Object { $_.FullName -match '[\\/]plugins[\\/]' } |
+            Select-Object -First 1
+          $packageDir = "package"
+          $artifact = "artifacts\discord-bridge-windows-${{ matrix.arch }}-$env:RELEASE_VERSION.zip"
+
+          if (-not $dll) {
+            throw "discord-bridge.dll was not produced"
+          }
+          New-Item -ItemType Directory -Force `
+            "$packageDir\components", "$packageDir\include", "artifacts" |
+            Out-Null
+          Copy-Item $dll.FullName "$packageDir\components\"
+          if ($pdb) {
+            Copy-Item $pdb.FullName "$packageDir\components\"
+          }
+
+          Copy-Item "build\pawno\include\discord-bridge.inc" "$packageDir\include\"
+          Copy-Item "build\pawno\include\discord-dcc-compat.inc" "$packageDir\include\"
+          Copy-Item "build\pawno\include\discord-connector.inc" "$packageDir\include\"
+
+          Compress-Archive -Path "$packageDir\*" -DestinationPath $artifact
+          (Get-FileHash $artifact -Algorithm SHA256).Hash.ToLower() |
+            Out-File "$artifact.sha256" -Encoding ascii
+
+          Get-ChildItem $artifact, "$artifact.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-bridge-windows-${{ matrix.arch }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
