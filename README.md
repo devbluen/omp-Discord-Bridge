@@ -81,3 +81,8 @@ Build outputs:
 For a 32-bit Linux build, add `-DDCC_BUILD_32BIT=ON` when configuring. On
 Windows with Visual Studio, select the 32-bit generator with `-A Win32`.
 Set `-DDCC_VERSION=MAJOR.MINOR.PATCH` to override the default version (`1.0.0`).
+
+## AI disclosure
+
+AI tools assisted with parts of the code and documentation. Review the source
+and test the plugin on your own server before using it in production.
