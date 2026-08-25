@@ -40,6 +40,9 @@ DiscordBot* nativeBot();
 DiscordBridgeComponent* component();
 
 std::unordered_map<cell, std::string> g_channelHandleToId;
+// Interaction payloads carry the channel's guild ID even before the gateway
+// cache has received the corresponding channel object.
+std::unordered_map<cell, std::string> g_channelHandleToGuildId;
 std::unordered_map<std::string, cell> g_channelIdToHandle;
 cell g_nextChannelHandle = 1;
 std::unordered_map<cell, std::string> g_userHandleToId;
@@ -139,6 +142,7 @@ int pawnPushAddress(NativePawnScript& script, cell* physicalAddress)
 void resetNativeHandles()
 {
 	g_channelHandleToId.clear();
+	g_channelHandleToGuildId.clear();
 	g_channelIdToHandle.clear();
 	g_nextChannelHandle = 1;
 
@@ -1908,8 +1912,23 @@ cell AMX_NATIVE_CALL Native_DCC_GetChannelGuild(AMX* amx, cell* params)
 {
 	DiscordChannel* channel = resolveChannelByHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
-	if (!channel || !out) return 0;
-	const std::string guildId(channel->getGuildId().data(), channel->getGuildId().length());
+	if (!out) return 0;
+
+	std::string guildId;
+	if (channel)
+	{
+		guildId.assign(channel->getGuildId().data(), channel->getGuildId().length());
+	}
+	else
+	{
+		// Interaction channels can be delivered before their gateway cache entry
+		// exists.  DCC_GetInteractionChannel records the guild ID from the
+		// payload so this native remains usable during that startup window.
+		const auto it = g_channelHandleToGuildId.find(params[1]);
+		if (it == g_channelHandleToGuildId.end()) return 0;
+		guildId = it->second;
+	}
+
 	*out = guildId.empty() ? 0 : assignGuildHandle(guildId);
 	return 1;
 }
@@ -2741,7 +2760,14 @@ cell AMX_NATIVE_CALL Native_DCC_GetInteractionChannel(AMX* amx, cell* params)
 {
 	auto it = g_interactions.find(params[1]); cell* out = nativeRef(amx, params[2]);
 	if (it == g_interactions.end() || !out) return 0;
-	*out = it->second.channelId.empty() ? 0 : assignChannelHandle(it->second.channelId);
+	if (it->second.channelId.empty())
+	{
+		*out = 0;
+		return 1;
+	}
+	const cell channelHandle = assignChannelHandle(it->second.channelId);
+	g_channelHandleToGuildId[channelHandle] = it->second.guildId;
+	*out = channelHandle;
 	return 1;
 }
 
