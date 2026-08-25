@@ -1919,14 +1919,11 @@ cell AMX_NATIVE_CALL Native_DCC_GetChannelGuild(AMX* amx, cell* params)
 	{
 		guildId.assign(channel->getGuildId().data(), channel->getGuildId().length());
 	}
-	else
+	if (guildId.empty())
 	{
-		// Interaction channels can be delivered before their gateway cache entry
-		// exists.  DCC_GetInteractionChannel records the guild ID from the
-		// payload so this native remains usable during that startup window.
 		const auto it = g_channelHandleToGuildId.find(params[1]);
-		if (it == g_channelHandleToGuildId.end()) return 0;
-		guildId = it->second;
+		if (it != g_channelHandleToGuildId.end()) guildId = it->second;
+		else if (!channel) return 0;
 	}
 
 	*out = guildId.empty() ? 0 : assignGuildHandle(guildId);
