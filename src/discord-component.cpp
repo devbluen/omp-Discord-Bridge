@@ -318,7 +318,9 @@ bool DiscordBridgeComponent::connectBot(StringView token, int intents)
 	}
 
 	bot_ = std::make_unique<DiscordBot>(this, core_, token, intents);
-	return bot_->connect();
+	const bool connected = bot_->connect();
+	if (connected) QueuePendingDiscordCommands(bot_.get());
+	return connected;
 }
 
 IDiscordChannel* DiscordBridgeComponent::findConfiguredChannel()
@@ -814,6 +816,10 @@ void DiscordBridgeComponent::onBotReadyEvent()
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onBotReady);
 	CallPawnPublic(pawn_, "OnDiscordReady");
 	CallPawnPublic(pawn_, "DCC_OnReady");
+	// A script may register commands before the bot object exists (notably
+	// during open.mp startup).  Flush those registrations after both ready
+	// callbacks have had a chance to create their commands.
+	QueuePendingDiscordCommands(bot_.get());
 }
 
 void DiscordBridgeComponent::onBotDisconnectedEvent()

@@ -81,6 +81,8 @@ struct CommandData
 	std::string callback;
 	NativePawnScript* callbackScript = nullptr;
 	std::shared_ptr<std::atomic_bool> creationCancelled;
+	bool allowEveryone = true;
+	bool creationQueued = false;
 };
 
 struct InteractionData
@@ -487,6 +489,144 @@ void logCommandResponseFailure(DiscordBot* bot, const char* operation, const std
 	DiscordLogWarning(bot->getComponent()->getCore(),
 		std::string("[DiscordBridge] Discord command '") + name + "' " + operation +
 		" failed (HTTP " + std::to_string(response.statusCode) + "): " + detail);
+}
+
+void markCommandCreationForRetry(DiscordBot* bot, cell handle,
+	const std::shared_ptr<std::atomic_bool>& creationCancelled)
+{
+	if (!bot) return;
+	bot->enqueueCompletion([handle, creationCancelled]()
+	{
+		auto it = g_commands.find(handle);
+		if (it != g_commands.end() && it->second.creationCancelled == creationCancelled &&
+			it->second.discordId.empty())
+		{
+			it->second.creationQueued = false;
+		}
+	});
+}
+
+bool queueCommandCreation(cell handle, DiscordBot* bot)
+{
+	auto it = g_commands.find(handle);
+	if (it == g_commands.end()) return false;
+
+	CommandData& command = it->second;
+	if (!command.discordId.empty() || command.creationQueued) return true;
+	if (!bot || !command.creationCancelled) return false;
+
+	const std::string guildId = command.guildId;
+	const std::string name = command.name;
+	const std::string bodyJson = DiscordJson {
+		{ "name", command.name },
+		{ "description", command.description },
+		{ "type", 1 },
+		{ "default_member_permissions", command.allowEveryone ? DiscordJson(nullptr) : DiscordJson("0") },
+		{ "options", DiscordJson::array({
+			{
+				{ "type", 3 },
+				{ "name", "arguments" },
+				{ "description", "just type" },
+				{ "required", false }
+			}
+		}) }
+	}.dump();
+	const std::shared_ptr<std::atomic_bool> creationCancelled = command.creationCancelled;
+	command.creationQueued = true;
+
+	if (!bot->submitRestTask([bot, handle, guildId, name, bodyJson, creationCancelled](DiscordHTTP& http)
+	{
+		if (creationCancelled->load(std::memory_order_acquire)) return;
+		// Loading the remote command list lazily preserves the legacy
+		// duplicate-by-name behavior without making command creation block Pawn.
+		const auto existingCommands = http.getApplicationCommands(guildId);
+		if (!existingCommands.success)
+		{
+			logCommandResponseFailure(bot, "lookup", name, existingCommands);
+			markCommandCreationForRetry(bot, handle, creationCancelled);
+			return;
+		}
+
+		const DiscordJson existingData = DiscordJson::parse(existingCommands.body, nullptr, false);
+		if (existingData.is_array())
+		{
+			for (const auto& item : existingData)
+			{
+				if (!item.is_object() || item.value("name", std::string()) != name) continue;
+				const std::string existingId = item.value("id", std::string());
+				if (existingId.empty()) continue;
+				if (creationCancelled->load(std::memory_order_acquire))
+				{
+					const auto deleteResponse = http.deleteApplicationCommand(guildId, existingId);
+					if (!deleteResponse.success) logCommandResponseFailure(bot, "cleanup", name, deleteResponse);
+					return;
+				}
+				bot->enqueueCompletion([handle, guildId, responseBody = existingCommands.body, creationCancelled]()
+				{
+					if (creationCancelled->load(std::memory_order_acquire)) return;
+					auto it = g_commands.find(handle);
+					if (it == g_commands.end()) return;
+					it->second.creationQueued = false;
+					cacheApplicationCommands(guildId, responseBody);
+				});
+				logCommandInfo("[DiscordBridge] Discord command '" + name + "' reuses an existing remote command");
+				return;
+			}
+		}
+
+		const auto response = http.createApplicationCommand(guildId, bodyJson);
+		if (!response.success)
+		{
+			logCommandResponseFailure(bot, "creation", name, response);
+			markCommandCreationForRetry(bot, handle, creationCancelled);
+			return;
+		}
+		const DiscordJson data = DiscordJson::parse(response.body, nullptr, false);
+		if (!data.is_object())
+		{
+			logCommandWarning("[DiscordBridge] Discord returned an invalid command creation response for '" + name + "'");
+			markCommandCreationForRetry(bot, handle, creationCancelled);
+			return;
+		}
+		const std::string discordId = data.value("id", std::string());
+		if (discordId.empty())
+		{
+			logCommandWarning("[DiscordBridge] Discord command creation response for '" + name + "' has no id");
+			markCommandCreationForRetry(bot, handle, creationCancelled);
+			return;
+		}
+		if (creationCancelled->load(std::memory_order_acquire))
+		{
+			const auto deleteResponse = http.deleteApplicationCommand(guildId, discordId);
+			if (!deleteResponse.success) logCommandResponseFailure(bot, "cleanup", name, deleteResponse);
+			return;
+		}
+		bot->enqueueCompletion([handle, discordId, creationCancelled]()
+		{
+			if (creationCancelled->load(std::memory_order_acquire)) return;
+			auto it = g_commands.find(handle);
+			if (it != g_commands.end())
+			{
+				it->second.discordId = discordId;
+				it->second.creationQueued = false;
+			}
+		});
+		logCommandInfo("[DiscordBridge] Discord command '" + name + "' was created remotely");
+	}))
+	{
+		command.creationQueued = false;
+		return false;
+	}
+	return true;
+}
+
+void queuePendingCommandCreations(DiscordBot* bot)
+{
+	if (!bot) return;
+	for (const auto& entry : g_commands)
+	{
+		if (entry.second.discordId.empty()) queueCommandCreation(entry.first, bot);
+	}
 }
 
 struct PawnCallbackArg
@@ -2474,8 +2614,6 @@ cell AMX_NATIVE_CALL Native_DCC_SendChannelEmbedMessage(AMX* amx, cell* params)
 
 cell AMX_NATIVE_CALL Native_DCC_CreateCommand(AMX* amx, cell* params)
 {
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
 	const std::string name = getAmxString(amx, params[1]);
 	const std::string description = getAmxString(amx, params[2]);
 	const std::string callback = getAmxString(amx, params[3]);
@@ -2502,103 +2640,28 @@ cell AMX_NATIVE_CALL Native_DCC_CreateCommand(AMX* amx, cell* params)
 			existing.callback = callback;
 			existing.callbackScript = callbackScript;
 			logCommandInfo("[DiscordBridge] local Discord command '" + name + "' uses Pawn callback '" + callback + "' (handle " + std::to_string(entry.first) + ")");
+			queueCommandCreation(entry.first, nativeBot());
 			return entry.first;
 		}
 	}
 	const auto creationCancelled = std::make_shared<std::atomic_bool>(false);
 	const CommandData command {
-		{}, guildId, name, description, callback, callbackScript, creationCancelled
+		{}, guildId, name, description, callback, callbackScript, creationCancelled, params[4] != 0
 	};
 	const cell handle = assignCommandHandle(command);
 	const char* callbackStatus = callbackScript ? "callback found" : "callback pending";
 	logCommandInfo("[DiscordBridge] local Discord command '" + name + "' uses Pawn callback '" + callback + "' (handle " + std::to_string(handle) + ", " + callbackStatus + ")");
-	DiscordJson body = {
-		{ "name", name },
-		{ "description", description },
-		{ "type", 1 },
-		{ "default_member_permissions", params[4] ? DiscordJson(nullptr) : DiscordJson("0") },
-		{ "options", DiscordJson::array({
-			{
-				{ "type", 3 },
-				{ "name", "arguments" },
-				{ "description", "just type" },
-				{ "required", false }
-			}
-		}) }
-	};
-	const std::string bodyJson = body.dump();
-	if (!bot->submitRestTask([bot, handle, guildId, name, bodyJson, creationCancelled](DiscordHTTP& http)
+	DiscordBot* bot = nativeBot();
+	if (!queueCommandCreation(handle, bot))
 	{
-		if (creationCancelled->load(std::memory_order_acquire)) return;
-		// Loading the remote command list lazily preserves the legacy
-		// duplicate-by-name behavior without making command creation block Pawn.
-		const auto existingCommands = http.getApplicationCommands(guildId);
-		if (!existingCommands.success)
+		if (!bot)
 		{
-			logCommandResponseFailure(bot, "lookup", name, existingCommands);
-			return;
+			logCommandInfo("[DiscordBridge] local Discord command '" + name + "' is waiting for the bot connection");
 		}
-
-		const DiscordJson existingData = DiscordJson::parse(existingCommands.body, nullptr, false);
-		if (existingData.is_array())
+		else
 		{
-			for (const auto& item : existingData)
-			{
-				if (!item.is_object() || item.value("name", std::string()) != name) continue;
-				const std::string existingId = item.value("id", std::string());
-				if (existingId.empty()) continue;
-				if (creationCancelled->load(std::memory_order_acquire))
-				{
-					const auto deleteResponse = http.deleteApplicationCommand(guildId, existingId);
-					if (!deleteResponse.success) logCommandResponseFailure(bot, "cleanup", name, deleteResponse);
-					return;
-				}
-				bot->enqueueCompletion([handle, guildId, responseBody = existingCommands.body, creationCancelled]()
-				{
-					if (creationCancelled->load(std::memory_order_acquire) || g_commands.find(handle) == g_commands.end()) return;
-					cacheApplicationCommands(guildId, responseBody);
-				});
-				logCommandInfo("[DiscordBridge] Discord command '" + name + "' reuses an existing remote command");
-				return;
-			}
+			logCommandWarning("[DiscordBridge] DCC_CreateCommand could not queue command '" + name + "'");
 		}
-
-		const auto response = http.createApplicationCommand(guildId, bodyJson);
-		if (!response.success)
-		{
-			logCommandResponseFailure(bot, "creation", name, response);
-			return;
-		}
-		const DiscordJson data = DiscordJson::parse(response.body, nullptr, false);
-		if (!data.is_object())
-		{
-			logCommandWarning("[DiscordBridge] Discord returned an invalid command creation response for '" + name + "'");
-			return;
-		}
-		const std::string discordId = data.value("id", std::string());
-		if (discordId.empty())
-		{
-			logCommandWarning("[DiscordBridge] Discord command creation response for '" + name + "' has no id");
-			return;
-		}
-		if (creationCancelled->load(std::memory_order_acquire))
-		{
-			const auto deleteResponse = http.deleteApplicationCommand(guildId, discordId);
-			if (!deleteResponse.success) logCommandResponseFailure(bot, "cleanup", name, deleteResponse);
-			return;
-		}
-		bot->enqueueCompletion([handle, discordId, creationCancelled]()
-		{
-			if (creationCancelled->load(std::memory_order_acquire)) return;
-			auto it = g_commands.find(handle);
-			if (it != g_commands.end()) it->second.discordId = discordId;
-		});
-		logCommandInfo("[DiscordBridge] Discord command '" + name + "' was created remotely");
-	}))
-	{
-		g_commands.erase(handle);
-		logCommandWarning("[DiscordBridge] DCC_CreateCommand could not queue command '" + name + "'");
-		return 0;
 	}
 	return handle;
 }
@@ -3353,6 +3416,11 @@ std::vector<AMX_NATIVE_INFO> buildNativeList()
 void HandleDiscordInteractionPayload(const std::string& json)
 {
 	handleDiscordInteractionPayloadInternal(json);
+}
+
+void QueuePendingDiscordCommands(DiscordBot* bot)
+{
+	queuePendingCommandCreations(bot);
 }
 
 int RegisterDiscordNatives(IPawnScript& script)

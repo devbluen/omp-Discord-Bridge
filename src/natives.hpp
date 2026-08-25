@@ -10,8 +10,11 @@
 #include <sdk.hpp>
 #include <string>
 
+class DiscordBot;
+
 int RegisterDiscordNatives(IPawnScript& script);
 void ForgetDiscordNativeScript(IPawnScript& script);
+void QueuePendingDiscordCommands(DiscordBot* bot);
 
 void ResetDiscordNativeHandles();
 
