@@ -251,7 +251,8 @@ jobs:
             "boost-asio[ssl]:$triplet" `
             "boost-beast:$triplet" `
             "openssl:$triplet" `
-            --triplet $triplet
+            --triplet $triplet `
+            --classic
 
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
@@ -268,6 +269,7 @@ jobs:
             -A "${{ matrix.cmake_arch }}" `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
             -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" `
+            -DVCPKG_MANIFEST_MODE=OFF `
             -DDISCORD_BRIDGE_VERSION="$env:RELEASE_VERSION" `
             -DDISCORD_BRIDGE_OMP_SDK_DIR="$ompSdk" `
             -DDISCORD_BRIDGE_STATIC_DEPS=ON
