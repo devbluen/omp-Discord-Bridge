@@ -250,8 +250,10 @@ void DiscordBot::stop()
 	// The REST handshake runs on its own thread.  Wait for it before touching
 	// the websocket object so shutdown cannot race its final connect call.
 	if (connectThread_.joinable()) connectThread_.join();
-	if (restThread_.joinable()) restThread_.join();
+	// Close the gateway before waiting for REST work, so the bot goes offline
+	// without waiting for an HTTP request that is still in flight.
 	if (websocket_) websocket_->disconnect();
+	if (restThread_.joinable()) restThread_.join();
 	connecting_ = false;
 	{
 		std::lock_guard<std::mutex> lock(gatewayEventsMutex_);

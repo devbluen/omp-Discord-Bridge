@@ -20,6 +20,9 @@ void ServiceDiscordNatives();
 // Called right after DBR_OnReady so commands created by scripts during
 // startup are published once the bot identity is known.
 void NotifyDiscordNativesReady();
+// Called after DBR_DisconnectBot tore the bot down.  Commands stay registered
+// and are published again on the next connection.
+void NotifyDiscordNativesDisconnected();
 
 cell GetOrCreateDiscordChannelHandle(StringView channelId);
 cell GetOrCreateDiscordGuildHandle(StringView guildId);

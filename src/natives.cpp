@@ -786,6 +786,14 @@ cell AMX_NATIVE_CALL Native_ConnectDiscordBot(AMX* amx, cell* params)
 	// A token outside the script (environment variable or server
 	// configuration) always wins, whichever of the two loads first.
 	bridge->loadConfiguration();
+	// DBR_DisconnectBot followed by DBR_ConnectBot in the same tick: reconnect
+	// once the old bot has been torn down.
+	if (bridge->isDisconnectPending())
+	{
+		if (!bridge->hasConfiguredToken() && token.empty()) return 0;
+		bridge->queueReconnect(token, intents);
+		return 1;
+	}
 	if (bridge->hasConfiguredToken())
 	{
 		if (!g_connectIgnoredWarned)
@@ -802,6 +810,12 @@ cell AMX_NATIVE_CALL Native_ConnectDiscordBot(AMX* amx, cell* params)
 	}
 
 	return bridge->connectBot(token, intents) ? 1 : 0;
+}
+
+cell AMX_NATIVE_CALL Native_DisconnectBot(AMX*, cell*)
+{
+	DiscordBridgeComponent* bridge = component();
+	return bridge && bridge->requestDisconnect() ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_SetDebugMode(AMX*, cell* params)
@@ -2102,6 +2116,7 @@ void appendCoreNatives(std::vector<AMX_NATIVE_INFO>& natives)
 	static const AMX_NATIVE_INFO kNatives[] = {
 		{ "DBR_ConnectBot", Native_ConnectDiscordBot },
 		{ "DBR_IsConnected", Native_IsDiscordConnected },
+		{ "DBR_DisconnectBot", Native_DisconnectBot },
 		{ "DBR_SetDebugMode", Native_SetDebugMode },
 		{ "DBR_IsDebugMode", Native_IsDebugMode },
 
@@ -2246,6 +2261,11 @@ void ServiceDiscordNatives()
 void NotifyDiscordNativesReady()
 {
 	onInteractionBotReady();
+}
+
+void NotifyDiscordNativesDisconnected()
+{
+	onInteractionBotDisconnected();
 }
 
 cell GetOrCreateDiscordChannelHandle(StringView channelId)

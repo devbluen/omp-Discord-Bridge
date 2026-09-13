@@ -117,7 +117,9 @@ private:
 	void writeNext(std::shared_ptr<WebSocketStream> connection);
 	void onWrite(beast::error_code ec, std::size_t bytesTransferred, std::shared_ptr<WebSocketStream> connection, std::shared_ptr<std::string> message);
 	void abandonConnection(std::shared_ptr<WebSocketStream> connection);
-	void shutdownOnIoThread();
+	// graceful sends a close frame first and needs the io_context running.
+	void shutdownOnIoThread(bool graceful);
+	void finishShutdown();
 	void sendIdentify();
 	void sendHeartbeat();
 	void sendResume();

@@ -146,4 +146,5 @@ void resetInteractionState();
 void forgetInteractionScript(int scriptId);
 void serviceInteractionState();
 void onInteractionBotReady();
+void onInteractionBotDisconnected();
 }

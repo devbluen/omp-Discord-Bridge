@@ -1933,6 +1933,22 @@ void serviceInteractionState()
 	}
 }
 
+void onInteractionBotDisconnected()
+{
+	// Interaction tokens and the record of published commands belong to the
+	// session that ended.  The next bot may even use another application, so
+	// publish every command again once it is ready.
+	g_interactions.clear();
+	g_deployedScopes.clear();
+	g_pendingScopes.clear();
+	g_commandWaitWarned = false;
+	if (g_commandsEverCreated && !g_commands.commands().empty())
+	{
+		g_commandsDirty = true;
+		g_commandsChangedAt = Clock::now();
+	}
+}
+
 void onInteractionBotReady()
 {
 	// Commands still waiting are published right away.  Already published

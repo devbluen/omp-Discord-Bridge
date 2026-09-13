@@ -147,6 +147,18 @@ public OnGameModeInit()
 Ligue o servidor. Quando o bot conectar, `DBR_OnReady` é chamado e tudo está
 pronto para uso.
 
+Para desligar o bot, chame `DBR_DisconnectBot()`. Ele fica offline no Discord
+na hora e `DBR_OnDisconnected` é chamado; seus comandos continuam registrados,
+então `DBR_ConnectBot` reconecta e publica todos de novo.
+
+```pawn
+public OnGameModeExit()
+{
+    DBR_DisconnectBot();
+    return 1;
+}
+```
+
 ### Escolhendo os intents
 
 Intents dizem ao Discord quais eventos enviar para o bot. Três deles são

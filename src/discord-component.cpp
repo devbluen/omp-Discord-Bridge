@@ -206,6 +206,54 @@ void DiscordBridgeComponent::loadConfiguration()
 
 }
 
+bool DiscordBridgeComponent::requestDisconnect()
+{
+	if (!bot_ || disconnectRequested_) return false;
+	disconnectRequested_ = true;
+	reconnectRequested_ = false;
+	// Outside the bot's own dispatch (OnGameModeExit, commands, timers...) the
+	// bot shuts down immediately, even when no further server tick will run.
+	if (!insideBotUpdate_) performPendingDisconnect();
+	return true;
+}
+
+void DiscordBridgeComponent::queueReconnect(StringView token, int intents)
+{
+	reconnectRequested_ = true;
+	reconnectToken_.assign(token.data(), token.length());
+	reconnectIntents_ = intents;
+}
+
+void DiscordBridgeComponent::performPendingDisconnect()
+{
+	if (!disconnectRequested_) return;
+	disconnectRequested_ = false;
+
+	const bool wasConnected = bot_ && bot_->isConnected();
+	if (bot_)
+	{
+		bot_->disconnect();
+		bot_.reset();
+	}
+	// Cached entities belong to the old session; handles, commands and
+	// builders created by scripts stay valid.
+	channels_.clear();
+	guilds_.clear();
+	users_.clear();
+	messages_.clear();
+	roles_.clear();
+	NotifyDiscordNativesDisconnected();
+	if (wasConnected) onBotDisconnectedEvent();
+
+	if (reconnectRequested_)
+	{
+		reconnectRequested_ = false;
+		if (hasConfiguredToken()) connectConfiguredBot();
+		else if (!reconnectToken_.empty()) connectBot(reconnectToken_, reconnectIntents_);
+		reconnectToken_.clear();
+	}
+}
+
 bool DiscordBridgeComponent::connectConfiguredBot()
 {
 	if (configuredToken_.empty()) return false;
@@ -284,6 +332,9 @@ void DiscordBridgeComponent::free()
 
 void DiscordBridgeComponent::reset()
 {
+	disconnectRequested_ = false;
+	reconnectRequested_ = false;
+	reconnectToken_.clear();
 	ResetDiscordNativeHandles();
 
 	channels_.clear();
@@ -471,8 +522,11 @@ void DiscordBridgeComponent::onTick(Microseconds, TimePoint)
 	ServiceDiscordNatives();
 	if (bot_)
 	{
+		insideBotUpdate_ = true;
 		bot_->update();
+		insideBotUpdate_ = false;
 	}
+	performPendingDisconnect();
 }
 
 DiscordBridgeComponent* DiscordBridgeComponent::getInstance()

@@ -294,6 +294,13 @@ enum DiscordIntent (<<= 1)
 // ignored with a warning.  Priority: environment variable > config > gamemode.
 native bool:DBR_ConnectBot(const token[], DiscordIntent:intents = DISCORD_INTENTS_ALL);
 native bool:DBR_IsConnected();
+// Shuts the bot down: it goes offline on Discord right away and
+// DBR_OnDisconnected is called if it was connected.  Safe in OnGameModeExit.
+// Called inside a Discord callback (DBR_OnCommand, DBR_OnButton...), it
+// happens when that callback returns.  Commands, handlers and handles are
+// kept; DBR_ConnectBot reconnects and publishes the commands again.
+// Returns 0 when no bot is running.
+native DBR_DisconnectBot();
 
 // Debug mode prints informational messages, such as application commands being
 // published.  It is off by default; warnings and errors are always printed.

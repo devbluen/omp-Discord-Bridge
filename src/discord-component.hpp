@@ -54,6 +54,14 @@ private:
 	std::string configuredToken_;
 	int configuredIntents_ = DISCORD_DEFAULT_INTENTS;
 	bool configurationLoaded_ = false;
+	// DBR_DisconnectBot can run inside a callback dispatched by the bot's own
+	// update().  Destroying the bot there would free the object that is still
+	// running, so in that case the disconnect waits until update() returns.
+	bool insideBotUpdate_ = false;
+	bool disconnectRequested_ = false;
+	bool reconnectRequested_ = false;
+	std::string reconnectToken_;
+	int reconnectIntents_ = DISCORD_DEFAULT_INTENTS;
 
 public:
 	StringView componentName() const override;
@@ -71,6 +79,10 @@ public:
 	void loadConfiguration();
 	bool hasConfiguredToken() const { return !configuredToken_.empty(); }
 	bool connectConfiguredBot();
+	bool requestDisconnect();
+	bool isDisconnectPending() const { return disconnectRequested_; }
+	void queueReconnect(StringView token, int intents);
+	void performPendingDisconnect();
 	IDiscordChannel* findConfiguredChannel();
 	StringView configuredChannelId() const { return StringView(configuredChannelId_); }
 

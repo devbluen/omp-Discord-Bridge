@@ -148,6 +148,18 @@ public OnGameModeInit()
 Start the server. Once the bot connects, `DBR_OnReady` is called and
 everything is ready to use.
 
+To shut the bot down, call `DBR_DisconnectBot()`. It goes offline on Discord
+right away and `DBR_OnDisconnected` is called; your commands stay registered,
+so `DBR_ConnectBot` reconnects and publishes them again.
+
+```pawn
+public OnGameModeExit()
+{
+    DBR_DisconnectBot();
+    return 1;
+}
+```
+
 ### Choosing intents
 
 Intents tell Discord which events to send to the bot. Three of them are

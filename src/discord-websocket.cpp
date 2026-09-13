@@ -377,7 +377,7 @@ void DiscordWebSocket::disconnect()
 		{
 			try
 			{
-				net::post(ioc_, [this]() { shutdownOnIoThread(); });
+				net::post(ioc_, [this]() { shutdownOnIoThread(true); });
 				shutdownPosted = true;
 			}
 			catch (const std::exception&)
@@ -390,7 +390,7 @@ void DiscordWebSocket::disconnect()
 			ioc_.stop();
 		}
 		networkThread_.join();
-		if (!shutdownPosted) shutdownOnIoThread();
+		if (!shutdownPosted) shutdownOnIoThread(false);
 		{
 			std::lock_guard<std::mutex> lock(networkStateMutex_);
 			networkStarted_ = false;
@@ -398,7 +398,7 @@ void DiscordWebSocket::disconnect()
 	}
 	else
 	{
-		shutdownOnIoThread();
+		shutdownOnIoThread(false);
 	}
 
 	// Release canceled handlers while the owning object is still fully alive.
@@ -407,11 +407,30 @@ void DiscordWebSocket::disconnect()
 	ioc_.stop();
 }
 
-void DiscordWebSocket::shutdownOnIoThread()
+void DiscordWebSocket::shutdownOnIoThread(bool graceful)
 {
 	heartbeatTimer_.cancel();
 	reconnectTimer_.cancel();
 	resolver_.cancel();
+	// A close frame makes Discord show the bot offline right away; closing only
+	// the socket leaves it online until the heartbeat times out.  The close
+	// needs the io_context to keep running, and Beast allows one write at a
+	// time, so it is skipped when the loop is gone or a write is pending.
+	if (graceful && ws_ && ws_->is_open() && !writeInProgress_)
+	{
+		auto connection = ws_;
+		beast::get_lowest_layer(*connection).expires_after(std::chrono::seconds(2));
+		connection->async_close(websocket::close_code::normal, [this, connection](beast::error_code)
+		{
+			finishShutdown();
+		});
+		return;
+	}
+	finishShutdown();
+}
+
+void DiscordWebSocket::finishShutdown()
+{
 	if (ws_)
 	{
 		beast::error_code closeEc;
