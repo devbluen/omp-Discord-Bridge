@@ -12,6 +12,21 @@
 #include "utils.hpp"
 #include <algorithm>
 
+namespace
+{
+void readNullableString(const DiscordJson& data, const char* key, std::string& target)
+{
+	const auto it = data.find(key);
+	if (it != data.end() && (it->is_string() || it->is_null())) target = it->is_string() ? it->get<std::string>() : std::string();
+}
+
+void readBool(const DiscordJson& data, const char* key, bool& target)
+{
+	const auto it = data.find(key);
+	if (it != data.end() && it->is_boolean()) target = it->get<bool>();
+}
+}
+
 DiscordGuild::DiscordGuild(DiscordBot* bot, DiscordBridgeComponent* component, StringView id, StringView name)
 	: guildId_(id.data(), id.length())
 	, guildName_(name.data(), name.length())
@@ -80,6 +95,10 @@ void DiscordGuild::updateFromJson(const std::string& json, bool includeMembers)
 	if ((data.find("name") != data.end()) && data["name"].is_string()) guildName_ = data["name"].get<std::string>();
 	if ((data.find("owner_id") != data.end()) && data["owner_id"].is_string()) ownerId_ = data["owner_id"].get<std::string>();
 	if ((data.find("member_count") != data.end()) && data["member_count"].is_number_integer()) memberCount_ = data["member_count"].get<int>();
+	else if ((data.find("approximate_member_count") != data.end()) && data["approximate_member_count"].is_number_integer()) memberCount_ = data["approximate_member_count"].get<int>();
+	readNullableString(data, "icon", iconHash_);
+	readNullableString(data, "banner", bannerHash_);
+	readNullableString(data, "description", description_);
 
 	if ((data.find("roles") != data.end()) && data["roles"].is_array())
 	{
@@ -177,6 +196,13 @@ void DiscordGuild::updateMemberFromJson(const std::string& json, StringView fall
 	{
 		member.nickname = data["nick"].is_string() ? data["nick"].get<std::string>() : std::string();
 	}
+	readNullableString(data, "avatar", member.avatarHash);
+	readNullableString(data, "joined_at", member.joinedAt);
+	readNullableString(data, "premium_since", member.premiumSince);
+	readNullableString(data, "communication_disabled_until", member.timeoutUntil);
+	readBool(data, "pending", member.pending);
+	readBool(data, "mute", member.mute);
+	readBool(data, "deaf", member.deaf);
 	if ((data.find("roles") != data.end()) && data["roles"].is_array())
 	{
 		member.roleIds.clear();

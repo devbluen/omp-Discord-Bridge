@@ -5,9 +5,8 @@
 
 #pragma once
 
-// The original connector bundled nlohmann/json.  Keep using that known-good
-// parser instead of attempting to interpret Discord payloads with substring
-// searches.  Discord's payloads are nested and may contain escaped strings,
+// Discord payloads are parsed with the bundled nlohmann/json instead of
+// substring searches.  Discord's payloads are nested and may contain escaped strings,
 // arrays, nulls, and fields added over time.
 #include <json.hpp>
 

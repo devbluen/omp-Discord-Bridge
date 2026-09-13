@@ -135,7 +135,7 @@ public:
 	void setMessageCallback(MessageCallback callback) { messageCallback_ = callback; }
 
 	bool sendMessage(const std::string& message);
-	bool sendPresenceUpdate(int status, const std::string& activityType, const std::string& activityName);
+	bool sendPresenceUpdate(int status, int activityType, const std::string& activityName, const std::string& activityUrl);
 
 	void requestGuildMembers(const std::string& guildId);
 	void update();

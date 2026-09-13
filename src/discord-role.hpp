@@ -19,6 +19,7 @@ private:
 	bool hoisted_;
 	int position_;
 	bool mentionable_;
+	bool managed_ = false;
 
 public:
 	DiscordRole(StringView id, StringView name);
@@ -31,6 +32,7 @@ public:
 	bool isHoisted() const override { return hoisted_; }
 	int getPosition() const override { return position_; }
 	bool isMentionable() const override { return mentionable_; }
+	bool isManaged() const { return managed_; }
 
 	void setName(StringView name) { roleName_ = std::string(name.data(), name.length()); }
 	void setColor(uint32_t color) { color_ = color; }

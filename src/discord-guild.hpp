@@ -24,6 +24,13 @@ public:
 		std::vector<std::string> roleIds;
 		std::string voiceChannelId;
 		int presenceStatus = 0;
+		std::string avatarHash;
+		std::string joinedAt;
+		std::string premiumSince;
+		std::string timeoutUntil;
+		bool pending = false;
+		bool mute = false;
+		bool deaf = false;
 	};
 
 private:
@@ -31,6 +38,9 @@ private:
 	std::string guildName_;
 	std::string ownerId_;
 	int memberCount_;
+	std::string iconHash_;
+	std::string bannerHash_;
+	std::string description_;
 	std::vector<std::string> roleIds_;
 	std::vector<std::string> channelIds_;
 	std::vector<std::string> memberOrder_;
@@ -46,6 +56,9 @@ public:
 	StringView getGuildName() const override { return StringView(guildName_); }
 	StringView getOwnerId() const override { return StringView(ownerId_); }
 	int getMemberCount() const override { return memberCount_; }
+	const std::string& getIconHash() const { return iconHash_; }
+	const std::string& getBannerHash() const { return bannerHash_; }
+	const std::string& getDescription() const { return description_; }
 	const std::vector<std::string>& getRoleIds() const { return roleIds_; }
 	const std::vector<std::string>& getChannelIds() const { return channelIds_; }
 	const std::vector<std::string>& getMemberIds() const { return memberOrder_; }

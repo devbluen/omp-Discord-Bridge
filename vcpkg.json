@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "discord-bridge",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "boost-beast",
+    "boost-system",
+    "openssl"
+  ]
+}

@@ -54,11 +54,15 @@ private:
 	static constexpr const char* API_BASE = "/api/v10";
 	static constexpr const char* API_PORT = "443";
 
-	Response makeRequest(http::verb method, const std::string& endpoint, const std::string& body = "");
+	Response makeRequest(http::verb method, const std::string& endpoint, const std::string& body, const std::string& auditReason);
 
 public:
 	DiscordHTTP(ICore* core, const std::string& token);
 	~DiscordHTTP() = default;
+
+	// Generic request against the REST API.  `auditReason` becomes the
+	// X-Audit-Log-Reason header shown in the guild's audit log.
+	Response request(http::verb method, const std::string& endpoint, const std::string& body = "", const std::string& auditReason = "");
 
 	Response getBotUser();
 	Response getGatewayBot();
@@ -91,12 +95,12 @@ public:
 	Response getUser(const std::string& userId);
 
 	Response getGuildMember(const std::string& guildId, const std::string& userId);
-	Response modifyGuildMember(const std::string& guildId, const std::string& userId, const std::string& jsonBody);
-	Response addGuildMemberRole(const std::string& guildId, const std::string& userId, const std::string& roleId);
-	Response removeGuildMemberRole(const std::string& guildId, const std::string& userId, const std::string& roleId);
-	Response removeGuildMember(const std::string& guildId, const std::string& userId);
-	Response createGuildMemberBan(const std::string& guildId, const std::string& userId, const std::string& reason = "");
-	Response removeGuildMemberBan(const std::string& guildId, const std::string& userId);
+	Response modifyGuildMember(const std::string& guildId, const std::string& userId, const std::string& jsonBody, const std::string& reason = "");
+	Response addGuildMemberRole(const std::string& guildId, const std::string& userId, const std::string& roleId, const std::string& reason = "");
+	Response removeGuildMemberRole(const std::string& guildId, const std::string& userId, const std::string& roleId, const std::string& reason = "");
+	Response removeGuildMember(const std::string& guildId, const std::string& userId, const std::string& reason = "");
+	Response createGuildMemberBan(const std::string& guildId, const std::string& userId, const std::string& reason = "", int deleteMessageSeconds = 0);
+	Response removeGuildMemberBan(const std::string& guildId, const std::string& userId, const std::string& reason = "");
 
 	Response modifyGuildRole(const std::string& guildId, const std::string& roleId, const std::string& jsonBody);
 	Response deleteGuildRole(const std::string& guildId, const std::string& roleId);

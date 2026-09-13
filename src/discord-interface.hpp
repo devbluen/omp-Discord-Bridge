@@ -60,12 +60,13 @@ enum class EDiscordActivityType
 	Streaming = 1,
 	Listening = 2,
 	Watching = 3,
+	Custom = 4,
 	Competing = 5
 };
 
-// Preserve the original connector's default (ALL_INTENTS = (1 << 17) - 1).
-// Deployments can override this to opt into newer Discord intent bits.
-constexpr int DCC_DEFAULT_INTENTS = 131071;
+// Every gateway intent up to bit 16.  Deployments can override it to opt out
+// of privileged intents or into newer intent bits.
+constexpr int DISCORD_DEFAULT_INTENTS = 131071;
 
 struct IDiscordEventHandler
 {
@@ -184,7 +185,7 @@ struct IDiscordBridgeComponent : public IComponent
 	virtual ~IDiscordBridgeComponent() = default;
 
 	virtual IDiscordBot* getBot() = 0;
-	virtual bool connectBot(StringView token, int intents = DCC_DEFAULT_INTENTS) = 0;
+	virtual bool connectBot(StringView token, int intents = DISCORD_DEFAULT_INTENTS) = 0;
 
 	virtual IDiscordChannel* findChannelById(StringView channelId) = 0;
 	virtual IDiscordChannel* findChannelByName(StringView channelName) = 0;

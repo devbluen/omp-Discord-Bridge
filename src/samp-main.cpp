@@ -38,10 +38,10 @@ std::string firstValue(const char* environmentName, const char* configName, cons
 
 int configuredIntents()
 {
-	const std::string value = firstValue("DCC_BOT_INTENTS", "discord_bot_intents", "discord.intents");
+	const std::string value = firstValue("DISCORD_BOT_INTENTS", "discord_bot_intents", "discord.intents");
 	if (value.empty())
 	{
-		return DCC_DEFAULT_INTENTS;
+		return DISCORD_DEFAULT_INTENTS;
 	}
 	try
 	{
@@ -49,7 +49,7 @@ int configuredIntents()
 	}
 	catch (...)
 	{
-		return DCC_DEFAULT_INTENTS;
+		return DISCORD_DEFAULT_INTENTS;
 	}
 }
 }
@@ -69,9 +69,9 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data)
 	SampAmx::setFunctionTable(data[PLUGIN_DATA_AMX_EXPORTS]);
 	logprintf = reinterpret_cast<logprintf_t>(data[PLUGIN_DATA_LOGPRINTF]);
 
-	const std::string token = firstValue("DCC_BOT_TOKEN", "discord_bot_token", "discord.bot_token");
-	const std::string channelId = firstValue("DCC_CHANNEL_ID", "discord_channel_id", "discord.channel_id");
-	const std::string channelName = firstValue("DCC_CHANNEL_NAME", "discord_channel_name", "discord.channel_name");
+	const std::string token = firstValue("DISCORD_BOT_TOKEN", "discord_bot_token", "discord.bot_token");
+	const std::string channelId = firstValue("DISCORD_CHANNEL_ID", "discord_channel_id", "discord.channel_id");
+	const std::string channelName = firstValue("DISCORD_CHANNEL_NAME", "discord_channel_name", "discord.channel_name");
 	DiscordBridgeComponent::getInstance()->start(token, configuredIntents(), channelId, channelName);
 
 	if (logprintf)
@@ -79,7 +79,7 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data)
 		logprintf("[DiscordBridge] discord-bridge v%s loaded as SA-MP plugin", DISCORD_BRIDGE_VERSION);
 		if (token.empty())
 		{
-			logprintf("[DiscordBridge] No bot token configured; use DCC_BOT_TOKEN or discord_bot_token in server.cfg");
+			logprintf("[DiscordBridge] No bot token configured; use DISCORD_BOT_TOKEN or discord_bot_token in server.cfg");
 		}
 	}
 	return true;

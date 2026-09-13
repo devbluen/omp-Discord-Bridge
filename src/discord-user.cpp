@@ -28,4 +28,7 @@ void DiscordUser::updateFromJson(const std::string& json)
 	if ((data.find("discriminator") != data.end()) && data["discriminator"].is_string()) discriminator_ = data["discriminator"].get<std::string>();
 	if ((data.find("bot") != data.end()) && data["bot"].is_boolean()) isBot_ = data["bot"].get<bool>();
 	if ((data.find("verified") != data.end()) && data["verified"].is_boolean()) verified_ = data["verified"].get<bool>();
+	if ((data.find("system") != data.end()) && data["system"].is_boolean()) system_ = data["system"].get<bool>();
+	if ((data.find("avatar") != data.end()) && (data["avatar"].is_string() || data["avatar"].is_null())) avatarHash_ = data["avatar"].is_string() ? data["avatar"].get<std::string>() : std::string();
+	if ((data.find("banner") != data.end()) && (data["banner"].is_string() || data["banner"].is_null())) bannerHash_ = data["banner"].is_string() ? data["banner"].get<std::string>() : std::string();
 }

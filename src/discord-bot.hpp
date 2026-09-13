@@ -35,6 +35,11 @@ private:
 	std::atomic<bool> connecting_;
 	std::atomic<bool> shouldStop_;
 	std::atomic<int> presenceStatus_ { 0 };
+	// A presence update replaces the whole presence, so the current activity
+	// is kept and sent again when only the status changes.
+	int activityType_ = 0;
+	std::string activityName_;
+	std::string activityUrl_;
 
 	std::unique_ptr<DiscordWebSocket> websocket_;
 	std::unique_ptr<DiscordHTTP> http_;
@@ -77,6 +82,7 @@ public:
 
 	bool setPresenceStatus(EDiscordPresenceStatus status) override;
 	bool setActivity(EDiscordActivityType type, StringView name) override;
+	bool setActivity(int type, StringView name, StringView url);
 	bool disconnect() override;
 	bool reconnect() override;
 

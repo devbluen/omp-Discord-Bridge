@@ -534,7 +534,7 @@ bool DiscordWebSocket::sendMessage(const std::string& message)
 	return true;
 }
 
-bool DiscordWebSocket::sendPresenceUpdate(int status, const std::string& activityType, const std::string& activityName)
+bool DiscordWebSocket::sendPresenceUpdate(int status, int activityType, const std::string& activityName, const std::string& activityUrl)
 {
 	if (shouldStop_)
 	{
@@ -552,12 +552,11 @@ bool DiscordWebSocket::sendPresenceUpdate(int status, const std::string& activit
 	};
 	if (!activityName.empty())
 	{
-		int type = 0;
-		if (activityType == "streaming") type = 1;
-		else if (activityType == "listening") type = 2;
-		else if (activityType == "watching") type = 3;
-		else if (activityType == "competing") type = 5;
-		payload["d"]["activities"].push_back({ { "name", activityName }, { "type", type } });
+		DiscordJson activity = { { "name", activityName }, { "type", activityType } };
+		// Custom statuses display `state`; Discord still requires a name.
+		if (activityType == 4) activity = { { "name", "Custom Status" }, { "type", 4 }, { "state", activityName } };
+		if (activityType == 1 && !activityUrl.empty()) activity["url"] = activityUrl;
+		payload["d"]["activities"].push_back(std::move(activity));
 	}
 	return sendMessage(payload.dump());
 }

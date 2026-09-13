@@ -83,16 +83,16 @@ jobs:
 
           arch_args=()
           if [[ "${{ matrix.arch }}" == "x86" ]]; then
-            arch_args+=("-DDCC_BUILD_32BIT=ON")
+            arch_args+=("-DDISCORD_BRIDGE_BUILD_32BIT=ON")
           else
-            arch_args+=("-DDCC_BUILD_32BIT=OFF")
+            arch_args+=("-DDISCORD_BRIDGE_BUILD_32BIT=OFF")
           fi
 
           ssl_args=()
           if [[ "${{ matrix.ssl }}" == "static" ]]; then
-            ssl_args+=("-DDCC_STATIC_DEPS=ON")
+            ssl_args+=("-DDISCORD_BRIDGE_STATIC_DEPS=ON")
           else
-            ssl_args+=("-DDCC_STATIC_DEPS=OFF")
+            ssl_args+=("-DDISCORD_BRIDGE_STATIC_DEPS=OFF")
             if [[ "${{ matrix.arch }}" == "x86" ]]; then
               # FindOpenSSL can otherwise consume the host's amd64
               # pkg-config result even though the compiler is running with
@@ -109,8 +109,8 @@ jobs:
           cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-            -DDCC_VERSION="$RELEASE_VERSION" \
-            -DDCC_OMP_SDK_DIR="$GITHUB_WORKSPACE/omp-sdk" \
+            -DDISCORD_BRIDGE_VERSION="$RELEASE_VERSION" \
+            -DDISCORD_BRIDGE_OMP_SDK_DIR="$GITHUB_WORKSPACE/omp-sdk" \
             "${arch_args[@]}" \
             "${ssl_args[@]}"
 
@@ -175,8 +175,6 @@ jobs:
             -exec cp -P {} "$package_dir/components/" \;
 
           cp build/pawno/include/discord-bridge.inc "$package_dir/include/"
-          cp build/pawno/include/discord-dcc-compat.inc "$package_dir/include/"
-          cp build/pawno/include/discord-connector.inc "$package_dir/include/"
 
           tar -czf "$artifact" -C "$package_dir" .
           sha256sum "$artifact" > "$artifact.sha256"
@@ -270,9 +268,9 @@ jobs:
             -A "${{ matrix.cmake_arch }}" `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
             -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" `
-            -DDCC_VERSION="$env:RELEASE_VERSION" `
-            -DDCC_OMP_SDK_DIR="$ompSdk" `
-            -DDCC_STATIC_DEPS=ON
+            -DDISCORD_BRIDGE_VERSION="$env:RELEASE_VERSION" `
+            -DDISCORD_BRIDGE_OMP_SDK_DIR="$ompSdk" `
+            -DDISCORD_BRIDGE_STATIC_DEPS=ON
 
       - name: Build
         shell: pwsh
@@ -338,8 +336,6 @@ jobs:
           }
 
           Copy-Item "build\pawno\include\discord-bridge.inc" "$packageDir\include\"
-          Copy-Item "build\pawno\include\discord-dcc-compat.inc" "$packageDir\include\"
-          Copy-Item "build\pawno\include\discord-connector.inc" "$packageDir\include\"
 
           Compress-Archive -Path "$packageDir\*" -DestinationPath $artifact
           (Get-FileHash $artifact -Algorithm SHA256).Hash.ToLower() |
