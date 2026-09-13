@@ -406,71 +406,25 @@ falta de permissão ou cargo do bot abaixo do alvo.
 **Os getters retornam 0.** O dado ainda não está em memória. Espere
 `DBR_OnReady` ou use a função `DBR_Fetch...` correspondente.
 
-**`Could NOT find OpenSSL` ao configurar.** As dependências não estão
-instaladas onde o CMake consegue achar. No Windows, compile com o preset do
-vcpkg (`cmake --preset windows-x86`) em vez de `cmake -S . -B build` e confira
-se `VCPKG_ROOT` está definida. No Linux, instale `libssl-dev` e
-`libboost-system-dev`.
-
 ## Compilando o plugin
 
-Clone o repositório com os submódulos, que trazem os SDKs do open.mp e do AMX:
+Requisitos: compilador C++17, CMake 3.19+, OpenSSL e Boost.System.
 
 ```sh
 git clone --recursive https://github.com/devbluen/omp-Discord-Bridge
 cd omp-Discord-Bridge
-```
-
-### Windows
-
-As dependências (OpenSSL e Boost) são instaladas automaticamente pelo
-[vcpkg](https://github.com/microsoft/vcpkg) a partir do `vcpkg.json`. Você só
-precisa do **Visual Studio 2022** com a carga *Desenvolvimento para desktop com
-C++*, do **CMake 3.21+** e do vcpkg.
-
-1. Instale o vcpkg uma vez. Use um caminho curto como `C:\vcpkg`: pastas
-   muito profundas estouram o limite de 260 caracteres do Windows ao compilar
-   as dependências.
-
-   ```powershell
-   git clone https://github.com/microsoft/vcpkg C:\vcpkg
-   C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-   setx VCPKG_ROOT C:\vcpkg
-   ```
-
-   Feche e abra o terminal para a variável `VCPKG_ROOT` valer.
-
-2. Compile. Na primeira vez o OpenSSL e o Boost são baixados e compilados, o
-   que leva de 10 a 15 minutos; as próximas compilações são rápidas.
-
-   ```powershell
-   cmake --preset windows-x86
-   cmake --build --preset windows-x86
-   ctest --preset windows-x86
-   ```
-
-Resultados em `build/windows-x86/`:
-
-- `plugins/Release/discord-bridge.dll`, `libssl-3.dll` e `libcrypto-3.dll`:
-  copie **os três** para o servidor (`components/` no open.mp, `plugins/` no SA-MP);
-- `pawno/include/discord-bridge.inc`: o include.
-
-Servidores Windows são 32 bits, então o preset sempre compila para Win32.
-
-### Linux
-
-```sh
-sudo apt install build-essential cmake libssl-dev libboost-system-dev
 cmake -S . -B build
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-Resultados: `build/plugins/discord-bridge.so` e `build/pawno/include/discord-bridge.inc`.
-Para a versão 32 bits usada pelo SA-MP, adicione `-DDISCORD_BRIDGE_BUILD_32BIT=ON`
-e instale as bibliotecas `:i386` (veja `.github/workflows/build.yml`).
+Resultados:
 
-Use `-DDISCORD_BRIDGE_VERSION=X.Y.Z` em qualquer plataforma para definir a versão.
+- `build/plugins/discord-bridge.so` (ou `.dll`): o plugin, para open.mp e SA-MP;
+- `build/pawno/include/discord-bridge.inc`: o include.
+
+Opções: `-DDISCORD_BRIDGE_BUILD_32BIT=ON` para 32 bits no Linux, `-A Win32`
+no Visual Studio e `-DDISCORD_BRIDGE_VERSION=X.Y.Z` para definir a versão.
 
 ## Aviso sobre IA
 
