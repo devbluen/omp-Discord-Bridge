@@ -26,6 +26,7 @@ public Cmd_Ping(DiscordInteraction:interaction, DiscordUser:user)
   - [1. Instale o plugin](#1-instale-o-plugin)
   - [2. Crie o bot no Discord](#2-crie-o-bot-no-discord)
   - [3. Configure o token](#3-configure-o-token)
+  - [Escolhendo os intents](#escolhendo-os-intents)
 - [Conceitos em 2 minutos](#conceitos-em-2-minutos)
 - [Guia rápido](#guia-rápido)
 - [Callbacks](#callbacks)
@@ -92,7 +93,15 @@ No seu script:
 
 ### 3. Configure o token
 
-Escolha **uma** das formas:
+O token pode ficar em três lugares. Se houver mais de um, vale o primeiro
+desta lista:
+
+1. a variável de ambiente `DISCORD_BOT_TOKEN`;
+2. a configuração do servidor (`config.json` no open.mp, `server.cfg` no SA-MP);
+3. `DBR_ConnectBot` na sua gamemode.
+
+Com token em 1 ou 2, o bot conecta sozinho e `DBR_ConnectBot` é ignorado (o log
+do servidor avisa); nesse caso escolha os intents com `discord_bot_intents`.
 
 **open.mp** (`config.json`):
 
@@ -112,21 +121,69 @@ discord_bot_token SEU_TOKEN
 discord_channel_id 123456789012345678
 ```
 
-**Variável de ambiente** (tem prioridade sobre os arquivos):
+**Variável de ambiente**:
 
 ```sh
 export DISCORD_BOT_TOKEN="SEU_TOKEN"
 ```
 
+**Gamemode** (usada só quando nenhuma das anteriores está definida):
+
+```pawn
+public OnGameModeInit()
+{
+    DBR_ConnectBot("SEU_TOKEN", DISCORD_INTENTS_DEFAULT);
+    return 1;
+}
+```
+
 | Configuração | Variável de ambiente | Para que serve |
 | --- | --- | --- |
 | `discord_bot_token` | `DISCORD_BOT_TOKEN` | Token do bot (obrigatório) |
-| `discord_bot_intents` | `DISCORD_BOT_INTENTS` | Intents do gateway (padrão `131071`, todos) |
+| `discord_bot_intents` | `DISCORD_BOT_INTENTS` | Intents do gateway (padrão: todos; veja [Escolhendo os intents](#escolhendo-os-intents)) |
 | `discord_channel_id` | `DISCORD_CHANNEL_ID` | Canal devolvido por `DBR_FindConfiguredChannel()` |
 | `discord_channel_name` | `DISCORD_CHANNEL_NAME` | Mesmo que acima, pelo nome do canal |
 
 Ligue o servidor. Quando o bot conectar, `DBR_OnReady` é chamado e tudo está
 pronto para uso.
+
+### Escolhendo os intents
+
+Intents dizem ao Discord quais eventos enviar para o bot. Três deles são
+**privilegiados** e também precisam ser ativados no Developer Portal (aba
+**Bot** > **Privileged Gateway Intents**); se o bot pedir um que não está
+ativado, o Discord recusa a conexão.
+
+| Intent | Privilegiado | Serve para |
+| --- | --- | --- |
+| `DISCORD_INTENT_GUILDS` | | Servidores, canais e cargos (quase tudo depende dele) |
+| `DISCORD_INTENT_GUILD_MEMBERS` | sim | Lista de membros, `DBR_OnGuildMemberAdd/Update/Remove` |
+| `DISCORD_INTENT_GUILD_PRESENCES` | sim | Status online dos membros |
+| `DISCORD_INTENT_GUILD_MESSAGES` | | `DBR_OnMessageCreate/Update/Delete` nos servidores |
+| `DISCORD_INTENT_MESSAGE_CONTENT` | sim | Ler o texto das mensagens |
+| `DISCORD_INTENT_GUILD_MESSAGE_REACTIONS` | | `DBR_OnMessageReaction` |
+| `DISCORD_INTENT_GUILD_VOICE_STATES` | | `DBR_OnGuildMemberVoiceUpdate` |
+| `DISCORD_INTENT_DIRECT_MESSAGES` | | Mensagens enviadas ao bot por DM |
+
+Presets prontos:
+
+| Preset | O que inclui |
+| --- | --- |
+| `DISCORD_INTENTS_ALL` | Tudo (padrão). Exige os três privilegiados ativados |
+| `DISCORD_INTENTS_DEFAULT` | Tudo que não precisa do Developer Portal |
+| `DISCORD_INTENTS_NONE` | Nenhum evento. Slash commands, botões e modais continuam funcionando |
+
+```pawn
+// Funciona sem ativar nada no Developer Portal:
+DBR_ConnectBot("SEU_TOKEN", DISCORD_INTENTS_DEFAULT);
+
+// Só o que você usa; ler o texto das mensagens exige Message Content ativado:
+DBR_ConnectBot("SEU_TOKEN", DISCORD_INTENT_GUILDS | DISCORD_INTENT_GUILD_MESSAGES | DISCORD_INTENT_MESSAGE_CONTENT);
+```
+
+Quando o token vem da configuração, `discord_bot_intents` recebe o mesmo valor
+como número: `53608447` para todos os intents, `53575421` para
+`DISCORD_INTENTS_DEFAULT`.
 
 ## Conceitos em 2 minutos
 
@@ -199,6 +256,15 @@ public DBR_OnActionFail(const action[], http_status, error_code, const message[]
     printf("[discord] %s falhou: %s", action, message);
     return 1;
 }
+```
+
+### Modo debug
+
+Mensagens informativas, como a publicação dos comandos, ficam ocultas por
+padrão. Ative durante os testes; avisos e erros aparecem sempre:
+
+```pawn
+DBR_SetDebugMode(true);
 ```
 
 ## Guia rápido
@@ -387,8 +453,10 @@ A lista completa de funções, com os parâmetros, está no include
 ## Problemas comuns
 
 **O bot não conecta.** Confira o token e se os intents privilegiados estão
-ativos no Developer Portal. Com o padrão `131071`, os três precisam estar
-ligados; se não quiser algum, ajuste `discord_bot_intents`.
+ativos no Developer Portal. Com o padrão (todos os intents), os três
+privilegiados precisam estar ligados. Para conectar sem eles, use
+`DBR_ConnectBot(token, DISCORD_INTENTS_DEFAULT)` ou `discord_bot_intents 53575421`.
+O log do servidor mostra qual intent falta quando o Discord recusa a conexão.
 
 **O comando não aparece.** Comandos globais podem levar alguns minutos.
 Registre no seu servidor para testar e verifique se o bot foi convidado com o

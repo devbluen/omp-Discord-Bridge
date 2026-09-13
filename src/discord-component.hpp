@@ -49,6 +49,11 @@ private:
 	bool isInitialized_ = false;
 	std::string configuredChannelId_;
 	std::string configuredChannelName_;
+	// Token from DISCORD_BOT_TOKEN or the server configuration.  It takes
+	// priority over DBR_ConnectBot.
+	std::string configuredToken_;
+	int configuredIntents_ = DISCORD_DEFAULT_INTENTS;
+	bool configurationLoaded_ = false;
 
 public:
 	StringView componentName() const override;
@@ -63,6 +68,9 @@ public:
 
 	IDiscordBot* getBot() override;
 	bool connectBot(StringView token, int intents) override;
+	void loadConfiguration();
+	bool hasConfiguredToken() const { return !configuredToken_.empty(); }
+	bool connectConfiguredBot();
 	IDiscordChannel* findConfiguredChannel();
 	StringView configuredChannelId() const { return StringView(configuredChannelId_); }
 

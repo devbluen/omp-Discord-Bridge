@@ -100,6 +100,12 @@ Clock::time_point g_commandsChangedAt;
 // Last JSON published per scope ("" is the global scope).  Identical
 // redeployments are skipped so gamemode restarts do not hit Discord.
 std::map<std::string, std::string> g_deployedScopes;
+// JSON currently being published per scope, so the same content is never
+// sent twice while the first request is still in flight.
+std::map<std::string, std::string> g_pendingScopes;
+// Warn once when commands keep waiting for a bot that never becomes ready.
+constexpr auto COMMAND_WAIT_WARNING_DELAY = std::chrono::seconds(30);
+bool g_commandWaitWarned = false;
 
 bool hasParams(const cell* params, size_t count)
 {
@@ -295,13 +301,24 @@ bool deployCommands()
 	{
 		const DiscordJson commands = g_commands.renderScope(scope);
 		const std::string body = commands.dump();
+		const auto pending = g_pendingScopes.find(scope);
+		if (pending != g_pendingScopes.end() && pending->second == body) continue;
 		const auto deployed = g_deployedScopes.find(scope);
-		if (deployed != g_deployedScopes.end() && deployed->second == body) continue;
+		if (pending == g_pendingScopes.end() && deployed != g_deployedScopes.end() && deployed->second == body) continue;
 		if (deployed == g_deployedScopes.end() && commands.empty()) continue;
 
 		const std::string label = scope.empty() ? std::string("global scope") : "guild " + scope;
 		const size_t count = commands.size();
-		queued = submitAction("DBR_DeployCommands", [scope, body](DiscordHTTP& rest)
+		std::string names;
+		for (const auto& command : commands)
+		{
+			if (!names.empty()) names += ", ";
+			names += command.value("name", std::string());
+		}
+		logInfo("[DiscordBridge] publishing " + std::to_string(count) + " application command(s) to the " + label +
+			(names.empty() ? std::string() : ": " + names));
+		g_pendingScopes[scope] = body;
+		const bool submitted = submitAction("DBR_DeployCommands", [scope, body](DiscordHTTP& rest)
 		{
 			const std::string& application = rest.getApplicationId();
 			const std::string endpoint = scope.empty()
@@ -310,11 +327,17 @@ bool deployCommands()
 			return rest.request(http::verb::put, endpoint, body);
 		}, [scope, body, label, count](const DiscordHTTP::Response& response)
 		{
+			if (auto current = g_pendingScopes.find(scope); current != g_pendingScopes.end() && current->second == body)
+			{
+				g_pendingScopes.erase(current);
+			}
 			if (!response.success) return;
 			if (count == 0) g_deployedScopes.erase(scope);
 			else g_deployedScopes[scope] = body;
 			logInfo("[DiscordBridge] published " + std::to_string(count) + " application command(s) to the " + label);
-		}) && queued;
+		});
+		if (!submitted) g_pendingScopes.erase(scope);
+		queued = submitted && queued;
 	}
 	return queued;
 }
@@ -1095,7 +1118,12 @@ cell AMX_NATIVE_CALL Native_SetCommandOptionAutocomplete(AMX*, cell* params)
 cell AMX_NATIVE_CALL Native_SetCommandOptionRange(AMX*, cell* params)
 {
 	CommandOption* option = hasParams(params, 3) ? g_commands.getOption(params[1]) : nullptr;
-	if (!option || (option->type != IntegerOption && option->type != NumberOption)) return 0;
+	if (!option) return 0;
+	if (option->type != IntegerOption && option->type != NumberOption)
+	{
+		warnNative("DBR_SetOptionRange", "only integer and number options have a range; use DBR_SetOptionLength for string options");
+		return 0;
+	}
 	const double minValue = amx_ctof(params[2]);
 	const double maxValue = amx_ctof(params[3]);
 	if (minValue > maxValue) return 0;
@@ -1108,7 +1136,12 @@ cell AMX_NATIVE_CALL Native_SetCommandOptionRange(AMX*, cell* params)
 cell AMX_NATIVE_CALL Native_SetCommandOptionLength(AMX*, cell* params)
 {
 	CommandOption* option = hasParams(params, 3) ? g_commands.getOption(params[1]) : nullptr;
-	if (!option || option->type != StringOption) return 0;
+	if (!option) return 0;
+	if (option->type != StringOption)
+	{
+		warnNative("DBR_SetOptionLength", "only string options have a length; use DBR_SetOptionRange for integer and number options");
+		return 0;
+	}
 	if (params[2] < 0 || params[3] < 1 || params[2] > params[3] || params[3] > 6000) return 0;
 	option->minLength = static_cast<int>(params[2]);
 	option->maxLength = static_cast<int>(params[3]);
@@ -1850,7 +1883,9 @@ void resetInteractionState()
 	g_handlers.clear();
 	g_commandsDirty = false;
 	g_commandsEverCreated = false;
+	g_commandWaitWarned = false;
 	g_deployedScopes.clear();
+	g_pendingScopes.clear();
 }
 
 void forgetInteractionScript(int scriptId)
@@ -1882,14 +1917,28 @@ void serviceInteractionState()
 	if (g_commandsDirty && g_commandAutoDeploy && g_commandsEverCreated && now - g_commandsChangedAt >= COMMAND_DEPLOY_DELAY)
 	{
 		DiscordBot* bot = nativeBot();
-		if (bot && bot->isConnected()) deployCommands();
+		if (bot && bot->isConnected())
+		{
+			g_commandWaitWarned = false;
+			deployCommands();
+		}
+		else if (!g_commandWaitWarned && now - g_commandsChangedAt >= COMMAND_WAIT_WARNING_DELAY)
+		{
+			g_commandWaitWarned = true;
+			logWarning(bot
+				? "[DiscordBridge] application commands are waiting for the bot to become ready; check the token and "
+				  "that every intent passed to DBR_ConnectBot is enabled in the Discord Developer Portal"
+				: "[DiscordBridge] application commands are waiting for DBR_ConnectBot or a configured discord_bot_token");
+		}
 	}
 }
 
 void onInteractionBotReady()
 {
-	if (!g_commandsEverCreated) return;
-	g_commandsDirty = true;
+	// Commands still waiting are published right away.  Already published
+	// commands stay as they are: forcing a new publish here duplicated the one
+	// that runs as soon as the gateway connects.
+	if (!g_commandsEverCreated || !g_commandsDirty) return;
 	g_commandsChangedAt = Clock::now() - COMMAND_DEPLOY_DELAY;
 }
 }

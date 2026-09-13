@@ -107,48 +107,58 @@ void DiscordBridgeComponent::onInit(IComponentList* components)
 void DiscordBridgeComponent::onReady()
 {
 	isInitialized_ = true;
+	loadConfiguration();
+	connectConfiguredBot();
+}
+
+void DiscordBridgeComponent::loadConfiguration()
+{
+	// Scripts may call natives before this component's onReady (the gamemode
+	// can load first), so the configuration is also read on first use.
+	if (configurationLoaded_ || !core_) return;
+	configurationLoaded_ = true;
 
 	const char* envToken = std::getenv("DISCORD_BOT_TOKEN");
 	const char* envIntents = std::getenv("DISCORD_BOT_INTENTS");
 	const char* envChannelId = std::getenv("DISCORD_CHANNEL_ID");
 	const char* envChannelName = std::getenv("DISCORD_CHANNEL_NAME");
 
-	std::string token;
-	int intents = DISCORD_DEFAULT_INTENTS;
+	configuredToken_.clear();
+	configuredIntents_ = DISCORD_DEFAULT_INTENTS;
 	configuredChannelId_.clear();
 	configuredChannelName_.clear();
 
 	if (envToken && *envToken)
 	{
-		token = envToken;
+		configuredToken_ = envToken;
 	}
 	else if (core_)
 	{
 		const StringView cfgToken = core_->getConfig().getString("discord_bot_token");
 		if (!cfgToken.empty())
 		{
-			token.assign(cfgToken.data(), cfgToken.length());
+			configuredToken_.assign(cfgToken.data(), cfgToken.length());
 		}
 		else
 		{
 			const StringView dottedToken = core_->getConfig().getString("discord.bot_token");
-			if (!dottedToken.empty()) token.assign(dottedToken.data(), dottedToken.length());
+			if (!dottedToken.empty()) configuredToken_.assign(dottedToken.data(), dottedToken.length());
 		}
 	}
 
 	if (envIntents && *envIntents)
 	{
-		intents = std::atoi(envIntents);
+		configuredIntents_ = std::atoi(envIntents);
 	}
 	else if (core_)
 	{
 		if (int* cfgIntents = core_->getConfig().getInt("discord_bot_intents"))
 		{
-			intents = *cfgIntents;
+			configuredIntents_ = *cfgIntents;
 		}
 		else if (int* dottedIntents = core_->getConfig().getInt("discord.intents"))
 		{
-			intents = *dottedIntents;
+			configuredIntents_ = *dottedIntents;
 		}
 	}
 
@@ -194,10 +204,12 @@ void DiscordBridgeComponent::onReady()
 		}
 	}
 
-	if (!token.empty())
-	{
-		connectBot(token, intents);
-	}
+}
+
+bool DiscordBridgeComponent::connectConfiguredBot()
+{
+	if (configuredToken_.empty()) return false;
+	return connectBot(configuredToken_, configuredIntents_);
 }
 
 void DiscordBridgeComponent::provideConfiguration(ILogger& logger, IEarlyConfig& config, bool defaults)
@@ -243,11 +255,10 @@ bool DiscordBridgeComponent::start(StringView token, int intents, StringView cha
 	isInitialized_ = true;
 	configuredChannelId_.assign(channelId.data(), channelId.length());
 	configuredChannelName_.assign(channelName.data(), channelName.length());
-	if (!token.empty())
-	{
-		return connectBot(token, intents);
-	}
-	return false;
+	configuredToken_.assign(token.data(), token.length());
+	configuredIntents_ = intents;
+	configurationLoaded_ = true;
+	return connectConfiguredBot();
 }
 
 void DiscordBridgeComponent::free()

@@ -249,8 +249,56 @@ enum DiscordPermission
 // Connection
 // -----------------------------------------------------------------------------
 
-native bool:DBR_ConnectBot(const token[], intents = 131071);
+// Gateway intents choose which events Discord sends to the bot.  Combine them
+// with |, for example DISCORD_INTENT_GUILDS | DISCORD_INTENT_GUILD_MESSAGES.
+// Intents marked [privileged] must also be enabled in the Discord Developer
+// Portal (Bot tab > Privileged Gateway Intents), otherwise Discord refuses the
+// connection.
+enum DiscordIntent (<<= 1)
+{
+	DISCORD_INTENT_GUILDS = 1,                  // servers, channels and roles (needed by almost everything)
+	DISCORD_INTENT_GUILD_MEMBERS,               // [privileged] member list, joins, leaves and updates
+	DISCORD_INTENT_GUILD_MODERATION,            // bans and audit log entries
+	DISCORD_INTENT_GUILD_EXPRESSIONS,           // emojis, stickers and soundboard sounds
+	DISCORD_INTENT_GUILD_INTEGRATIONS,          // integration updates
+	DISCORD_INTENT_GUILD_WEBHOOKS,              // webhook updates
+	DISCORD_INTENT_GUILD_INVITES,               // invite creation and deletion
+	DISCORD_INTENT_GUILD_VOICE_STATES,          // voice channel joins, leaves and moves
+	DISCORD_INTENT_GUILD_PRESENCES,             // [privileged] online status and activities
+	DISCORD_INTENT_GUILD_MESSAGES,              // messages sent in servers
+	DISCORD_INTENT_GUILD_MESSAGE_REACTIONS,     // reactions in servers
+	DISCORD_INTENT_GUILD_MESSAGE_TYPING,        // typing indicators in servers
+	DISCORD_INTENT_DIRECT_MESSAGES,             // direct messages to the bot
+	DISCORD_INTENT_DIRECT_MESSAGE_REACTIONS,    // reactions in direct messages
+	DISCORD_INTENT_DIRECT_MESSAGE_TYPING,       // typing indicators in direct messages
+	DISCORD_INTENT_MESSAGE_CONTENT,             // [privileged] text, embeds and attachments of messages
+	DISCORD_INTENT_GUILD_SCHEDULED_EVENTS,      // scheduled events
+	DISCORD_INTENT_AUTOMOD_CONFIG = 1048576,    // AutoMod rule changes
+	DISCORD_INTENT_AUTOMOD_EXECUTION,           // AutoMod actions
+	DISCORD_INTENT_GUILD_MESSAGE_POLLS = 16777216, // poll votes in servers
+	DISCORD_INTENT_DIRECT_MESSAGE_POLLS         // poll votes in direct messages
+};
+
+// No events at all.  Slash commands, buttons and modals still work.
+#define DISCORD_INTENTS_NONE (DiscordIntent:0)
+// The three intents that must be enabled in the Developer Portal.
+#define DISCORD_INTENTS_PRIVILEGED (DISCORD_INTENT_GUILD_MEMBERS | DISCORD_INTENT_GUILD_PRESENCES | DISCORD_INTENT_MESSAGE_CONTENT)
+// Every intent.  Requires the three privileged intents in the Developer Portal.
+#define DISCORD_INTENTS_ALL (DiscordIntent:53608447)
+// Every intent that works without touching the Developer Portal.
+#define DISCORD_INTENTS_DEFAULT (DiscordIntent:53575421)
+
+// Connects the bot from the gamemode.  A token set outside the script (the
+// DISCORD_BOT_TOKEN environment variable or discord_bot_token in config.json /
+// server.cfg) takes priority: the bot then connects by itself and this call is
+// ignored with a warning.  Priority: environment variable > config > gamemode.
+native bool:DBR_ConnectBot(const token[], DiscordIntent:intents = DISCORD_INTENTS_ALL);
 native bool:DBR_IsConnected();
+
+// Debug mode prints informational messages, such as application commands being
+// published.  It is off by default; warnings and errors are always printed.
+native DBR_SetDebugMode(bool:enabled);
+native bool:DBR_IsDebugMode();
 
 // -----------------------------------------------------------------------------
 // Channels

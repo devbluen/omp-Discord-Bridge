@@ -98,6 +98,8 @@ private:
 	static constexpr const char* GATEWAY_PATH = "/?v=10&encoding=json";
 
 	void logGatewayError(const char* stage, const beast::error_code& ec);
+	// Logs an explanation and returns true for close codes that make reconnecting pointless.
+	bool reportFatalClose(int code);
 	void handleMessage(const std::string& message);
 	void run();
 	void startResolve();

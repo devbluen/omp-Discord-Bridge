@@ -39,6 +39,46 @@ void DiscordWebSocket::logGatewayError(const char* stage, const beast::error_cod
 	DiscordLogWarning(core_, std::string("[DiscordBridge] Gateway ") + stage + " failed: " + ec.message());
 }
 
+bool DiscordWebSocket::reportFatalClose(int code)
+{
+	std::string message;
+	switch (code)
+	{
+		case 4004:
+			message = "the bot token is invalid (close code 4004). Reset the token in the Discord Developer Portal and update it";
+			break;
+		case 4012:
+			message = "the gateway API version is not supported (close code 4012)";
+			break;
+		case 4013:
+			message = "the intents value is invalid (close code 4013). Build it from DISCORD_INTENT_* flags";
+			break;
+		case 4014:
+		{
+			std::string missing;
+			const auto add = [&missing, this](int bit, const char* name)
+			{
+				if (intents_ & bit)
+				{
+					if (!missing.empty()) missing += ", ";
+					missing += name;
+				}
+			};
+			add(1 << 1, "Server Members");
+			add(1 << 8, "Presence");
+			add(1 << 15, "Message Content");
+			message = "the bot requested privileged intents that are not enabled (close code 4014). Enable " +
+				(missing.empty() ? std::string("the privileged intents") : missing) +
+				" in the Discord Developer Portal (Bot > Privileged Gateway Intents), or connect with DISCORD_INTENTS_DEFAULT";
+			break;
+		}
+		default:
+			return false;
+	}
+	DiscordLogWarning(core_, "[DiscordBridge] Discord refused the connection: " + message + ".");
+	return true;
+}
+
 DiscordWebSocket::DiscordWebSocket(DiscordBot* bot, ICore* core, const std::string& token, int intents)
 	: sslCtx_(ssl::context::tlsv12_client)
 	, resolver_(ioc_)
@@ -238,6 +278,13 @@ void DiscordWebSocket::onRead(beast::error_code ec, std::size_t, std::shared_ptr
 	}
 	if (ec)
 	{
+		// Some close codes mean reconnecting can never succeed (bad token,
+		// intents that are not enabled...).  Explain them and stop retrying.
+		if (ec == websocket::error::closed && reportFatalClose(static_cast<int>(connection->reason().code)))
+		{
+			abandonConnection(connection);
+			return;
+		}
 		if (!shouldStop_) logGatewayError("read", ec);
 		abandonConnection(connection);
 		if (!shouldStop_)

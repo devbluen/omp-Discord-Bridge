@@ -303,8 +303,13 @@ void logWarning(const std::string& message)
 	DiscordLogWarning(bridge ? bridge->getCore() : nullptr, message);
 }
 
+// Informational messages are only printed in debug mode; warnings always are.
+bool g_debugMode = false;
+bool g_connectIgnoredWarned = false;
+
 void logInfo(const std::string& message)
 {
+	if (!g_debugMode) return;
 	DiscordBridgeComponent* bridge = component();
 	DiscordLogMessage(bridge ? bridge->getCore() : nullptr, message);
 }
@@ -770,13 +775,44 @@ cell AMX_NATIVE_CALL Native_ConnectDiscordBot(AMX* amx, cell* params)
 	}
 
 	const std::string token = getAmxString(amx, params[1]);
-	const int intents = (params[0] >= static_cast<cell>(3 * sizeof(cell))) ? static_cast<int>(params[2]) : DISCORD_DEFAULT_INTENTS;
+	// DBR_ConnectBot(token[], DiscordIntent:intents) has two parameters.
+	const int intents = nativeParamCount(params) >= 2 ? static_cast<int>(params[2]) : DISCORD_DEFAULT_INTENTS;
+	DiscordBridgeComponent* bridge = component();
+	if (!bridge)
+	{
+		return 0;
+	}
+
+	// A token outside the script (environment variable or server
+	// configuration) always wins, whichever of the two loads first.
+	bridge->loadConfiguration();
+	if (bridge->hasConfiguredToken())
+	{
+		if (!g_connectIgnoredWarned)
+		{
+			g_connectIgnoredWarned = true;
+			logWarning("[DiscordBridge] DBR_ConnectBot was ignored: the token set in DISCORD_BOT_TOKEN or the server "
+				"configuration (discord_bot_token) takes priority. Choose the intents there with discord_bot_intents.");
+		}
+		return bridge->connectConfiguredBot() ? 1 : 0;
+	}
 	if (token.empty())
 	{
 		return 0;
 	}
 
-	return component()->connectBot(token, intents) ? 1 : 0;
+	return bridge->connectBot(token, intents) ? 1 : 0;
+}
+
+cell AMX_NATIVE_CALL Native_SetDebugMode(AMX*, cell* params)
+{
+	g_debugMode = nativeParamCount(params) >= 1 && params[1] != 0;
+	return 1;
+}
+
+cell AMX_NATIVE_CALL Native_IsDebugMode(AMX*, cell*)
+{
+	return g_debugMode ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_IsDiscordConnected(AMX*, cell*)
@@ -2066,6 +2102,8 @@ void appendCoreNatives(std::vector<AMX_NATIVE_INFO>& natives)
 	static const AMX_NATIVE_INFO kNatives[] = {
 		{ "DBR_ConnectBot", Native_ConnectDiscordBot },
 		{ "DBR_IsConnected", Native_IsDiscordConnected },
+		{ "DBR_SetDebugMode", Native_SetDebugMode },
+		{ "DBR_IsDebugMode", Native_IsDebugMode },
 
 		{ "DBR_FindChannelByID", Native_FindChannelById },
 		{ "DBR_FindChannelByName", Native_FindChannelByName },

@@ -64,9 +64,10 @@ enum class EDiscordActivityType
 	Competing = 5
 };
 
-// Every gateway intent up to bit 16.  Deployments can override it to opt out
-// of privileged intents or into newer intent bits.
-constexpr int DISCORD_DEFAULT_INTENTS = 131071;
+// Every gateway intent, including the privileged GUILD_MEMBERS (1 << 1),
+// GUILD_PRESENCES (1 << 8) and MESSAGE_CONTENT (1 << 15), which must also be
+// enabled in the Developer Portal.  Matches DISCORD_INTENTS_ALL in the include.
+constexpr int DISCORD_DEFAULT_INTENTS = 53608447;
 
 struct IDiscordEventHandler
 {
