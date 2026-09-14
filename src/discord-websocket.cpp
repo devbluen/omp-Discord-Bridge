@@ -39,6 +39,46 @@ void DiscordWebSocket::logGatewayError(const char* stage, const beast::error_cod
 	DiscordLogWarning(core_, std::string("[DiscordBridge] Gateway ") + stage + " failed: " + ec.message());
 }
 
+bool DiscordWebSocket::reportFatalClose(int code)
+{
+	std::string message;
+	switch (code)
+	{
+		case 4004:
+			message = "the bot token is invalid (close code 4004). Reset the token in the Discord Developer Portal and update it";
+			break;
+		case 4012:
+			message = "the gateway API version is not supported (close code 4012)";
+			break;
+		case 4013:
+			message = "the intents value is invalid (close code 4013). Build it from DISCORD_INTENT_* flags";
+			break;
+		case 4014:
+		{
+			std::string missing;
+			const auto add = [&missing, this](int bit, const char* name)
+			{
+				if (intents_ & bit)
+				{
+					if (!missing.empty()) missing += ", ";
+					missing += name;
+				}
+			};
+			add(1 << 1, "Server Members");
+			add(1 << 8, "Presence");
+			add(1 << 15, "Message Content");
+			message = "the bot requested privileged intents that are not enabled (close code 4014). Enable " +
+				(missing.empty() ? std::string("the privileged intents") : missing) +
+				" in the Discord Developer Portal (Bot > Privileged Gateway Intents), or connect with DISCORD_INTENTS_DEFAULT";
+			break;
+		}
+		default:
+			return false;
+	}
+	DiscordLogWarning(core_, "[DiscordBridge] Discord refused the connection: " + message + ".");
+	return true;
+}
+
 DiscordWebSocket::DiscordWebSocket(DiscordBot* bot, ICore* core, const std::string& token, int intents)
 	: sslCtx_(ssl::context::tlsv12_client)
 	, resolver_(ioc_)
@@ -238,6 +278,13 @@ void DiscordWebSocket::onRead(beast::error_code ec, std::size_t, std::shared_ptr
 	}
 	if (ec)
 	{
+		// Some close codes mean reconnecting can never succeed (bad token,
+		// intents that are not enabled...).  Explain them and stop retrying.
+		if (ec == websocket::error::closed && reportFatalClose(static_cast<int>(connection->reason().code)))
+		{
+			abandonConnection(connection);
+			return;
+		}
 		if (!shouldStop_) logGatewayError("read", ec);
 		abandonConnection(connection);
 		if (!shouldStop_)
@@ -330,7 +377,7 @@ void DiscordWebSocket::disconnect()
 		{
 			try
 			{
-				net::post(ioc_, [this]() { shutdownOnIoThread(); });
+				net::post(ioc_, [this]() { shutdownOnIoThread(true); });
 				shutdownPosted = true;
 			}
 			catch (const std::exception&)
@@ -343,7 +390,7 @@ void DiscordWebSocket::disconnect()
 			ioc_.stop();
 		}
 		networkThread_.join();
-		if (!shutdownPosted) shutdownOnIoThread();
+		if (!shutdownPosted) shutdownOnIoThread(false);
 		{
 			std::lock_guard<std::mutex> lock(networkStateMutex_);
 			networkStarted_ = false;
@@ -351,7 +398,7 @@ void DiscordWebSocket::disconnect()
 	}
 	else
 	{
-		shutdownOnIoThread();
+		shutdownOnIoThread(false);
 	}
 
 	// Release canceled handlers while the owning object is still fully alive.
@@ -360,11 +407,30 @@ void DiscordWebSocket::disconnect()
 	ioc_.stop();
 }
 
-void DiscordWebSocket::shutdownOnIoThread()
+void DiscordWebSocket::shutdownOnIoThread(bool graceful)
 {
 	heartbeatTimer_.cancel();
 	reconnectTimer_.cancel();
 	resolver_.cancel();
+	// A close frame makes Discord show the bot offline right away; closing only
+	// the socket leaves it online until the heartbeat times out.  The close
+	// needs the io_context to keep running, and Beast allows one write at a
+	// time, so it is skipped when the loop is gone or a write is pending.
+	if (graceful && ws_ && ws_->is_open() && !writeInProgress_)
+	{
+		auto connection = ws_;
+		beast::get_lowest_layer(*connection).expires_after(std::chrono::seconds(2));
+		connection->async_close(websocket::close_code::normal, [this, connection](beast::error_code)
+		{
+			finishShutdown();
+		});
+		return;
+	}
+	finishShutdown();
+}
+
+void DiscordWebSocket::finishShutdown()
+{
 	if (ws_)
 	{
 		beast::error_code closeEc;
@@ -534,7 +600,7 @@ bool DiscordWebSocket::sendMessage(const std::string& message)
 	return true;
 }
 
-bool DiscordWebSocket::sendPresenceUpdate(int status, const std::string& activityType, const std::string& activityName)
+bool DiscordWebSocket::sendPresenceUpdate(int status, int activityType, const std::string& activityName, const std::string& activityUrl)
 {
 	if (shouldStop_)
 	{
@@ -552,12 +618,11 @@ bool DiscordWebSocket::sendPresenceUpdate(int status, const std::string& activit
 	};
 	if (!activityName.empty())
 	{
-		int type = 0;
-		if (activityType == "streaming") type = 1;
-		else if (activityType == "listening") type = 2;
-		else if (activityType == "watching") type = 3;
-		else if (activityType == "competing") type = 5;
-		payload["d"]["activities"].push_back({ { "name", activityName }, { "type", type } });
+		DiscordJson activity = { { "name", activityName }, { "type", activityType } };
+		// Custom statuses display `state`; Discord still requires a name.
+		if (activityType == 4) activity = { { "name", "Custom Status" }, { "type", 4 }, { "state", activityName } };
+		if (activityType == 1 && !activityUrl.empty()) activity["url"] = activityUrl;
+		payload["d"]["activities"].push_back(std::move(activity));
 	}
 	return sendMessage(payload.dump());
 }

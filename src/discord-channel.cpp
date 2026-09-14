@@ -139,4 +139,5 @@ void DiscordChannel::updateFromJson(const std::string& json)
 	if ((data.find("position") != data.end()) && data["position"].is_number_integer()) position_ = data["position"].get<int>();
 	if ((data.find("nsfw") != data.end()) && data["nsfw"].is_boolean()) nsfw_ = data["nsfw"].get<bool>();
 	if ((data.find("flags") != data.end()) && data["flags"].is_number_unsigned()) flags_ = data["flags"].get<uint32_t>();
+	if ((data.find("rate_limit_per_user") != data.end()) && data["rate_limit_per_user"].is_number_integer()) rateLimitPerUser_ = data["rate_limit_per_user"].get<int>();
 }

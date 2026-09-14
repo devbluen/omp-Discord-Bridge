@@ -71,8 +71,7 @@ DiscordGuild* findOrCreateGuild(DiscordBridgeComponent* component, const std::st
 	if (!component || id.empty()) return nullptr;
 	// Gateway member/presence/role events are meaningful only for a guild that
 	// has already arrived through GUILD_CREATE.  Creating an empty placeholder
-	// here makes delete/update callbacks fire for objects the legacy connector
-	// would correctly treat as uncached.
+	// here would fire delete/update callbacks for objects scripts never saw.
 	return static_cast<DiscordGuild*>(component->findGuildById(id));
 }
 }
@@ -112,24 +111,26 @@ bool DiscordBot::setPresenceStatus(EDiscordPresenceStatus status)
 {
 	if (!websocket_) return false;
 	const int value = static_cast<int>(status);
-	const bool sent = websocket_->sendPresenceUpdate(value, "", "");
+	const bool sent = websocket_->sendPresenceUpdate(value, activityType_, activityName_, activityUrl_);
 	if (sent) presenceStatus_ = value;
 	return sent;
 }
 
 bool DiscordBot::setActivity(EDiscordActivityType type, StringView name)
 {
-	if (!websocket_) return false;
-	const char* activityType = "playing";
-	switch (type)
-	{
-		case EDiscordActivityType::Playing: activityType = "playing"; break;
-		case EDiscordActivityType::Streaming: activityType = "streaming"; break;
-		case EDiscordActivityType::Listening: activityType = "listening"; break;
-		case EDiscordActivityType::Watching: activityType = "watching"; break;
-		case EDiscordActivityType::Competing: activityType = "competing"; break;
-	}
-	return websocket_->sendPresenceUpdate(presenceStatus_.load(), activityType, std::string(name.data(), name.length()));
+	return setActivity(static_cast<int>(type), name, StringView());
+}
+
+bool DiscordBot::setActivity(int type, StringView name, StringView url)
+{
+	if (!websocket_ || type < 0 || type > 5) return false;
+	const std::string activityName(name.data(), name.length());
+	const std::string activityUrl(url.data(), url.length());
+	if (!websocket_->sendPresenceUpdate(presenceStatus_.load(), type, activityName, activityUrl)) return false;
+	activityType_ = type;
+	activityName_ = activityName;
+	activityUrl_ = activityUrl;
+	return true;
 }
 
 bool DiscordBot::disconnect()
@@ -249,8 +250,10 @@ void DiscordBot::stop()
 	// The REST handshake runs on its own thread.  Wait for it before touching
 	// the websocket object so shutdown cannot race its final connect call.
 	if (connectThread_.joinable()) connectThread_.join();
-	if (restThread_.joinable()) restThread_.join();
+	// Close the gateway before waiting for REST work, so the bot goes offline
+	// without waiting for an HTTP request that is still in flight.
 	if (websocket_) websocket_->disconnect();
+	if (restThread_.joinable()) restThread_.join();
 	connecting_ = false;
 	{
 		std::lock_guard<std::mutex> lock(gatewayEventsMutex_);
@@ -482,7 +485,7 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 		}
 		// The websocket thread may already be running, but the bot is not
 		// considered connected until Discord has accepted IDENTIFY and sent
-		// READY.  This keeps IsDiscordConnected and startup callbacks honest.
+		// READY.  This keeps DBR_IsConnected and startup callbacks honest.
 		connected_ = true;
 		connecting_ = false;
 		if ((data.find("private_channels") != data.end()) && data["private_channels"].is_array())

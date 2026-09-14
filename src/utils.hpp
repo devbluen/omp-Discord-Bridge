@@ -13,6 +13,7 @@ namespace DiscordUtils
 	std::string escapeJson(const std::string& str);
 	std::string unescapeJson(const std::string& str);
 	std::string urlEncode(const std::string& str);
+	std::string base64Encode(const std::string& data);
 
 	std::string extractJsonString(const std::string& json, const std::string& key);
 	int64_t extractJsonInt(const std::string& json, const std::string& key);

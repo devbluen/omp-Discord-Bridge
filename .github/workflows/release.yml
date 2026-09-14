@@ -197,10 +197,13 @@ jobs:
             "$TAG_NAME"
             --title "$RELEASE_NAME"
             --notes-file release-notes.md
-            --latest
           )
+
+          # GitHub rejects a prerelease marked as the latest release.
           if [[ "$IS_PRERELEASE" == true ]]; then
             release_args+=(--prerelease)
+          else
+            release_args+=(--latest)
           fi
 
           gh release create "${release_args[@]}" release-files/*

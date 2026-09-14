@@ -98,6 +98,8 @@ private:
 	static constexpr const char* GATEWAY_PATH = "/?v=10&encoding=json";
 
 	void logGatewayError(const char* stage, const beast::error_code& ec);
+	// Logs an explanation and returns true for close codes that make reconnecting pointless.
+	bool reportFatalClose(int code);
 	void handleMessage(const std::string& message);
 	void run();
 	void startResolve();
@@ -115,7 +117,9 @@ private:
 	void writeNext(std::shared_ptr<WebSocketStream> connection);
 	void onWrite(beast::error_code ec, std::size_t bytesTransferred, std::shared_ptr<WebSocketStream> connection, std::shared_ptr<std::string> message);
 	void abandonConnection(std::shared_ptr<WebSocketStream> connection);
-	void shutdownOnIoThread();
+	// graceful sends a close frame first and needs the io_context running.
+	void shutdownOnIoThread(bool graceful);
+	void finishShutdown();
 	void sendIdentify();
 	void sendHeartbeat();
 	void sendResume();
@@ -135,7 +139,7 @@ public:
 	void setMessageCallback(MessageCallback callback) { messageCallback_ = callback; }
 
 	bool sendMessage(const std::string& message);
-	bool sendPresenceUpdate(int status, const std::string& activityType, const std::string& activityName);
+	bool sendPresenceUpdate(int status, int activityType, const std::string& activityName, const std::string& activityUrl);
 
 	void requestGuildMembers(const std::string& guildId);
 	void update();

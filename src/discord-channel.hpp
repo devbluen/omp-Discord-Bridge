@@ -23,6 +23,7 @@ private:
 	int position_;
 	bool nsfw_;
 	uint32_t flags_;
+	int rateLimitPerUser_ = 0;
 
 	DiscordBot* bot_;
 
@@ -40,6 +41,7 @@ public:
 	const std::string& getParentId() const { return parentId_; }
 	const std::string& getLastMessageId() const { return lastMessageId_; }
 	uint32_t getFlags() const { return flags_; }
+	int getRateLimitPerUser() const { return rateLimitPerUser_; }
 
 	bool sendMessage(StringView content) override;
 	bool setName(StringView name) override;

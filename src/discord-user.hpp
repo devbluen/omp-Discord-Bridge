@@ -17,6 +17,9 @@ private:
 	std::string globalName_;
 	bool isBot_;
 	bool verified_;
+	bool system_ = false;
+	std::string avatarHash_;
+	std::string bannerHash_;
 
 public:
 	DiscordUser(StringView id, StringView username, StringView discriminator, bool isBot);
@@ -27,6 +30,9 @@ public:
 	bool isBot() const override { return isBot_; }
 	bool isVerified() const override { return verified_; }
 	StringView getGlobalName() const { return StringView(globalName_); }
+	bool isSystem() const { return system_; }
+	const std::string& getAvatarHash() const { return avatarHash_; }
+	const std::string& getBannerHash() const { return bannerHash_; }
 
 	void setUsername(StringView name) { username_ = std::string(name.data(), name.length()); }
 	void setDiscriminator(StringView disc) { discriminator_ = std::string(disc.data(), disc.length()); }

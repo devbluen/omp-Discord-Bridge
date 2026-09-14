@@ -4,6 +4,7 @@
  */
 
 #include "natives.hpp"
+#include "natives-internal.hpp"
 #include "discord-bot.hpp"
 #include "discord-component.hpp"
 #include "discord-channel.hpp"
@@ -29,16 +30,8 @@
 #include <cstdint>
 #include <atomic>
 
-namespace
+namespace DiscordNatives
 {
-using NativeFunc = cell (*)(AMX*, cell*);
-
-using NativePawnScript = IPawnScript;
-using NativePawnComponent = IPawnComponent;
-
-DiscordBot* nativeBot();
-DiscordBridgeComponent* component();
-
 std::unordered_map<cell, std::string> g_channelHandleToId;
 // Interaction payloads carry the channel's guild ID even before the gateway
 // cache has received the corresponding channel object.
@@ -60,56 +53,9 @@ cell g_nextRoleHandle = 1;
 std::unordered_map<cell, std::string> g_emojiHandleToToken;
 cell g_nextEmojiHandle = 1;
 
-struct EmbedData
-{
-	std::string title;
-	std::string description;
-	std::string url;
-	std::string timestamp;
-	std::string footerText;
-	std::string footerIconUrl;
-	std::string thumbnailUrl;
-	std::string imageUrl;
-	int color = 0;
-	struct Field { std::string name; std::string value; bool inlineField = false; };
-	std::vector<Field> fields;
-};
-
-struct CommandData
-{
-	std::string discordId;
-	std::string guildId;
-	std::string name;
-	std::string description;
-	std::string callback;
-	NativePawnScript* callbackScript = nullptr;
-	std::shared_ptr<std::atomic_bool> creationCancelled;
-	bool allowEveryone = true;
-	bool creationQueued = false;
-};
-
-struct InteractionData
-{
-	std::string id;
-	std::string token;
-	std::string content;
-	std::string channelId;
-	std::string guildId;
-	std::vector<cell> mentions;
-	bool responded = false;
-};
-
-std::unordered_map<cell, EmbedData> g_embeds;
-std::unordered_map<cell, CommandData> g_commands;
-std::unordered_map<cell, InteractionData> g_interactions;
-std::unordered_set<std::string> g_loggedCommandWarnings;
+std::unordered_map<cell, std::string> g_messageHandleToChannelId;
+std::unordered_map<cell, DiscordBuilders::Embed> g_embeds;
 cell g_nextEmbedHandle = 1;
-cell g_nextCommandHandle = 1;
-cell g_nextInteractionHandle = 1;
-cell g_createdMessageHandle = 0;
-cell g_createdGuildChannelHandle = 0;
-cell g_createdPrivateChannelHandle = 0;
-cell g_createdGuildRoleHandle = 0;
 
 DiscordBridgeComponent* component()
 {
@@ -165,17 +111,10 @@ void resetNativeHandles()
 	g_emojiHandleToToken.clear();
 	g_nextEmojiHandle = 1;
 
+	g_messageHandleToChannelId.clear();
 	g_embeds.clear();
-	g_commands.clear();
-	g_interactions.clear();
-	g_loggedCommandWarnings.clear();
 	g_nextEmbedHandle = 1;
-	g_nextCommandHandle = 1;
-	g_nextInteractionHandle = 1;
-	g_createdMessageHandle = 0;
-	g_createdGuildChannelHandle = 0;
-	g_createdPrivateChannelHandle = 0;
-	g_createdGuildRoleHandle = 0;
+	resetInteractionState();
 }
 
 cell assignChannelHandle(StringView channelId)
@@ -268,78 +207,6 @@ cell assignEmojiHandle(const std::string& emojiToken)
 	return handle;
 }
 
-cell assignCommandHandle(CommandData command)
-{
-	const cell handle = g_nextCommandHandle++;
-	g_commands.emplace(handle, std::move(command));
-	return handle;
-}
-
-void cacheApplicationCommands(StringView guildId, const std::string& json)
-{
-	const DiscordJson data = DiscordJson::parse(json, nullptr, false);
-	if (data.is_discarded() || !data.is_array()) return;
-	const std::string guild(guildId.data(), guildId.length());
-	for (const auto& item : data)
-	{
-		if (!item.is_object()) continue;
-		const std::string id = item.value("id", std::string());
-		const std::string name = item.value("name", std::string());
-		if (id.empty() || name.empty()) continue;
-
-		bool found = false;
-		for (auto& entry : g_commands)
-		{
-			CommandData& command = entry.second;
-			if (command.guildId == guild && command.name == name)
-			{
-				command.discordId = id;
-				if (command.description.empty()) command.description = item.value("description", std::string());
-				found = true;
-				break;
-			}
-		}
-		if (!found)
-		{
-			CommandData command;
-			command.discordId = id;
-			command.guildId = guild;
-			command.name = name;
-			command.description = item.value("description", std::string());
-			command.creationCancelled = std::make_shared<std::atomic_bool>(false);
-			assignCommandHandle(std::move(command));
-		}
-	}
-}
-
-cell assignInteractionHandle(InteractionData interaction)
-{
-	const cell handle = g_nextInteractionHandle++;
-	g_interactions.emplace(handle, std::move(interaction));
-	return handle;
-}
-
-void collectInteractionTextMentions(InteractionData& interaction)
-{
-	if (interaction.guildId.empty() || interaction.content.empty()) return;
-
-	for (size_t position = 0; position < interaction.content.size();)
-	{
-		const size_t marker = interaction.content.find("<@", position);
-		if (marker == std::string::npos) break;
-		size_t cursor = marker + 2;
-		if (cursor < interaction.content.size() && interaction.content[cursor] == '!') ++cursor;
-		const size_t idStart = cursor;
-		while (cursor < interaction.content.size() && std::isdigit(static_cast<unsigned char>(interaction.content[cursor]))) ++cursor;
-		if (cursor > idStart && cursor < interaction.content.size() && interaction.content[cursor] == '>')
-		{
-			const std::string userId = interaction.content.substr(idStart, cursor - idStart);
-			if (component()->findUserById(userId)) interaction.mentions.push_back(assignUserHandle(userId));
-		}
-		position = marker + 2;
-	}
-}
-
 std::string getAmxString(AMX* amx, cell amxParam)
 {
 	NativePawnScript* script = pawnScriptFor(amx);
@@ -400,7 +267,7 @@ bool pawnScriptHasPublic(NativePawnScript* script, const char* name)
 		publicIndex >= 0 && publicIndex != INT_MAX;
 }
 
-NativePawnScript* findPawnScriptWithPublic(const char* name, NativePawnScript* preferred = nullptr)
+NativePawnScript* findPawnScriptWithPublic(const char* name, NativePawnScript* preferred)
 {
 	DiscordBridgeComponent* bridge = component();
 	if (!bridge || !bridge->getPawnComponent()) return nullptr;
@@ -418,9 +285,9 @@ NativePawnScript* findPawnScriptWithPublic(const char* name, NativePawnScript* p
 		}
 	}
 
-	// The legacy connector's CallFirst semantics stop at the first AMX that
-	// actually exports the public. Calling every script duplicates callbacks
-	// when a side script happens to contain a public with the same name.
+	// Stop at the first AMX that actually exports the public.  Calling every
+	// script would duplicate callbacks when a side script happens to contain
+	// a public with the same name.
 	NativePawnScript* main = pawn->mainScript();
 	if (pawnScriptHasPublic(main, name)) return main;
 	for (NativePawnScript* script : pawn->sideScripts())
@@ -430,225 +297,58 @@ NativePawnScript* findPawnScriptWithPublic(const char* name, NativePawnScript* p
 	return nullptr;
 }
 
-template <typename... Args>
-bool callPawnPublicOnScript(NativePawnScript* script, const char* name, Args... args)
-{
-	if (!script) return false;
-	int publicIndex = -1;
-	if (script->FindPublic(name, &publicIndex) != AMX_ERR_NONE || publicIndex < 0 || publicIndex == INT_MAX)
-	{
-		return false;
-	}
-
-	cell result = DefaultReturnValue_True;
-	const int error = script->CallChecked(publicIndex, result, args...);
-	if (error != AMX_ERR_NONE) script->PrintError(error);
-	return true;
-}
-
-template <typename... Args>
-bool callPawnPublic(const char* name, Args... args)
-{
-	NativePawnScript* script = findPawnScriptWithPublic(name);
-	return script && callPawnPublicOnScript(script, name, args...);
-}
-
-template <typename... Args>
-bool callPawnPublicFromScript(const char* name, NativePawnScript* preferred, Args... args)
-{
-	NativePawnScript* script = findPawnScriptWithPublic(name, preferred);
-	return script && callPawnPublicOnScript(script, name, args...);
-}
-
-void logCommandWarning(const std::string& message)
+void logWarning(const std::string& message)
 {
 	DiscordBridgeComponent* bridge = component();
 	DiscordLogWarning(bridge ? bridge->getCore() : nullptr, message);
 }
 
-void logCommandWarningOnce(const std::string& key, const std::string& message)
-{
-	if (g_loggedCommandWarnings.emplace(key).second)
-	{
-		logCommandWarning(message);
-	}
-}
+// Informational messages are only printed in debug mode; warnings always are.
+bool g_debugMode = false;
+bool g_connectIgnoredWarned = false;
 
-void logCommandInfo(const std::string& message)
+void logInfo(const std::string& message)
 {
+	if (!g_debugMode) return;
 	DiscordBridgeComponent* bridge = component();
 	DiscordLogMessage(bridge ? bridge->getCore() : nullptr, message);
 }
 
-void logCommandResponseFailure(DiscordBot* bot, const char* operation, const std::string& name,
-	const DiscordHTTP::Response& response)
+void reportActionFailure(const std::string& action, const DiscordHTTP::Response& response)
 {
-	std::string detail = response.body.empty() ? "network or TLS failure" : response.body;
-	for (char& character : detail)
+	std::string message = response.body.empty() ? "network or TLS failure" : response.body;
+	int code = 0;
+	const DiscordJson error = DiscordJson::parse(response.body, nullptr, false);
+	if (error.is_object())
+	{
+		const auto text = error.find("message");
+		if (text != error.end() && text->is_string()) message = text->get<std::string>();
+		const auto number = error.find("code");
+		if (number != error.end() && number->is_number_integer()) code = number->get<int>();
+	}
+	for (char& character : message)
 	{
 		if (character == '\r' || character == '\n') character = ' ';
 	}
-	if (detail.size() > 180) detail.resize(180);
-	if (!bot || !bot->getComponent()) return;
-	DiscordLogWarning(bot->getComponent()->getCore(),
-		std::string("[DiscordBridge] Discord command '") + name + "' " + operation +
-		" failed (HTTP " + std::to_string(response.statusCode) + "): " + detail);
+	if (message.size() > 256) message.resize(256);
+	callPawnPublic("DBR_OnActionFail", 1, StringView(action), static_cast<cell>(response.statusCode),
+		static_cast<cell>(code), StringView(message));
 }
 
-void markCommandCreationForRetry(DiscordBot* bot, cell handle,
-	const std::shared_ptr<std::atomic_bool>& creationCancelled)
+bool submitAction(const std::string& action, RestRequest request, RestCompletion completion)
 {
-	if (!bot) return;
-	bot->enqueueCompletion([handle, creationCancelled]()
+	DiscordBot* bot = nativeBot();
+	if (!bot || !request) return false;
+	return bot->submitRestTask([bot, action, request = std::move(request), completion = std::move(completion)](DiscordHTTP& http)
 	{
-		auto it = g_commands.find(handle);
-		if (it != g_commands.end() && it->second.creationCancelled == creationCancelled &&
-			it->second.discordId.empty())
+		const DiscordHTTP::Response response = request(http);
+		bot->enqueueCompletion([action, response, completion]()
 		{
-			it->second.creationQueued = false;
-		}
+			if (!response.success) reportActionFailure(action, response);
+			if (completion) completion(response);
+		});
 	});
 }
-
-bool queueCommandCreation(cell handle, DiscordBot* bot)
-{
-	auto it = g_commands.find(handle);
-	if (it == g_commands.end()) return false;
-
-	CommandData& command = it->second;
-	if (!command.discordId.empty() || command.creationQueued) return true;
-	if (!bot || !command.creationCancelled) return false;
-
-	const std::string guildId = command.guildId;
-	const std::string name = command.name;
-	const std::string bodyJson = DiscordJson {
-		{ "name", command.name },
-		{ "description", command.description },
-		{ "type", 1 },
-		{ "default_member_permissions", command.allowEveryone ? DiscordJson(nullptr) : DiscordJson("0") },
-		{ "options", DiscordJson::array({
-			{
-				{ "type", 3 },
-				{ "name", "arguments" },
-				{ "description", "just type" },
-				{ "required", false }
-			}
-		}) }
-	}.dump();
-	const std::shared_ptr<std::atomic_bool> creationCancelled = command.creationCancelled;
-	command.creationQueued = true;
-
-	if (!bot->submitRestTask([bot, handle, guildId, name, bodyJson, creationCancelled](DiscordHTTP& http)
-	{
-		if (creationCancelled->load(std::memory_order_acquire)) return;
-		// Loading the remote command list lazily preserves the legacy
-		// duplicate-by-name behavior without making command creation block Pawn.
-		const auto existingCommands = http.getApplicationCommands(guildId);
-		if (!existingCommands.success)
-		{
-			logCommandResponseFailure(bot, "lookup", name, existingCommands);
-			markCommandCreationForRetry(bot, handle, creationCancelled);
-			return;
-		}
-
-		const DiscordJson existingData = DiscordJson::parse(existingCommands.body, nullptr, false);
-		if (existingData.is_array())
-		{
-			for (const auto& item : existingData)
-			{
-				if (!item.is_object() || item.value("name", std::string()) != name) continue;
-				const std::string existingId = item.value("id", std::string());
-				if (existingId.empty()) continue;
-				if (creationCancelled->load(std::memory_order_acquire))
-				{
-					const auto deleteResponse = http.deleteApplicationCommand(guildId, existingId);
-					if (!deleteResponse.success) logCommandResponseFailure(bot, "cleanup", name, deleteResponse);
-					return;
-				}
-				bot->enqueueCompletion([handle, guildId, responseBody = existingCommands.body, creationCancelled]()
-				{
-					if (creationCancelled->load(std::memory_order_acquire)) return;
-					auto it = g_commands.find(handle);
-					if (it == g_commands.end()) return;
-					it->second.creationQueued = false;
-					cacheApplicationCommands(guildId, responseBody);
-				});
-				logCommandInfo("[DiscordBridge] Discord command '" + name + "' reuses an existing remote command");
-				return;
-			}
-		}
-
-		const auto response = http.createApplicationCommand(guildId, bodyJson);
-		if (!response.success)
-		{
-			logCommandResponseFailure(bot, "creation", name, response);
-			markCommandCreationForRetry(bot, handle, creationCancelled);
-			return;
-		}
-		const DiscordJson data = DiscordJson::parse(response.body, nullptr, false);
-		if (!data.is_object())
-		{
-			logCommandWarning("[DiscordBridge] Discord returned an invalid command creation response for '" + name + "'");
-			markCommandCreationForRetry(bot, handle, creationCancelled);
-			return;
-		}
-		const std::string discordId = data.value("id", std::string());
-		if (discordId.empty())
-		{
-			logCommandWarning("[DiscordBridge] Discord command creation response for '" + name + "' has no id");
-			markCommandCreationForRetry(bot, handle, creationCancelled);
-			return;
-		}
-		if (creationCancelled->load(std::memory_order_acquire))
-		{
-			const auto deleteResponse = http.deleteApplicationCommand(guildId, discordId);
-			if (!deleteResponse.success) logCommandResponseFailure(bot, "cleanup", name, deleteResponse);
-			return;
-		}
-		bot->enqueueCompletion([handle, discordId, creationCancelled]()
-		{
-			if (creationCancelled->load(std::memory_order_acquire)) return;
-			auto it = g_commands.find(handle);
-			if (it != g_commands.end())
-			{
-				it->second.discordId = discordId;
-				it->second.creationQueued = false;
-			}
-		});
-		logCommandInfo("[DiscordBridge] Discord command '" + name + "' was created remotely");
-	}))
-	{
-		command.creationQueued = false;
-		return false;
-	}
-	return true;
-}
-
-void queuePendingCommandCreations(DiscordBot* bot)
-{
-	if (!bot) return;
-	for (const auto& entry : g_commands)
-	{
-		if (entry.second.discordId.empty()) queueCommandCreation(entry.first, bot);
-	}
-}
-
-struct PawnCallbackArg
-{
-	enum class Type { Cell, String, Array, Reference };
-	Type type = Type::Cell;
-	cell value = 0;
-	cell referenceAddress = 0;
-	std::string text;
-	std::vector<cell> array;
-};
-
-struct PreparedPawnCallback
-{
-	int scriptId = -1;
-	std::string name;
-	std::vector<PawnCallbackArg> args;
-};
 
 constexpr size_t MAX_CALLBACK_ARRAY_CELLS = 4096;
 
@@ -674,7 +374,7 @@ bool pawnArrayRangeValid(NativePawnScript& script, cell address, size_t cells)
 	return end <= static_cast<uint64_t>(script.GetSTP());
 }
 
-bool executePawnCallback(const PreparedPawnCallback& prepared)
+bool executePawnCallback(const PreparedPawnCallback& prepared, const std::vector<cell>& leading)
 {
 	if (prepared.name.empty()) return true;
 	NativePawnScript* script = pawnScriptForId(prepared.scriptId);
@@ -721,6 +421,14 @@ bool executePawnCallback(const PreparedPawnCallback& prepared)
 			return false;
 		}
 	}
+	for (auto it = leading.rbegin(); it != leading.rend(); ++it)
+	{
+		if (script->Push(*it) != AMX_ERR_NONE)
+		{
+			script->Release(heap);
+			return false;
+		}
+	}
 
 	cell result = 0;
 	const int error = script->Exec(&result, publicIndex);
@@ -731,8 +439,8 @@ bool executePawnCallback(const PreparedPawnCallback& prepared)
 bool callbackParametersValid(AMX* amx, cell callbackParam, cell formatParam, cell* params, size_t firstParam)
 {
 	const std::string callback = getAmxString(amx, callbackParam);
-	// An empty callback is explicitly supported by the legacy API.  Its format
-	// and variadic arguments are ignored in that case.
+	// An empty callback is valid; its format and variadic arguments are then
+	// ignored.
 	if (callback.empty()) return true;
 	if (callback.size() > 31) return false;
 
@@ -883,68 +591,44 @@ bool capturePawnCallback(AMX* amx, cell callbackParam, cell formatParam, cell* p
 	return pendingArray == static_cast<size_t>(-1);
 }
 
-DiscordJson embedToJson(const EmbedData& embed)
-{
-	DiscordJson result = DiscordJson::object();
-	if (!embed.title.empty()) result["title"] = embed.title;
-	if (!embed.description.empty()) result["description"] = embed.description;
-	if (!embed.url.empty()) result["url"] = embed.url;
-	if (!embed.timestamp.empty()) result["timestamp"] = embed.timestamp;
-	if (embed.color != 0) result["color"] = embed.color;
-	if (!embed.footerText.empty())
-	{
-		result["footer"] = { { "text", embed.footerText } };
-		if (!embed.footerIconUrl.empty()) result["footer"]["icon_url"] = embed.footerIconUrl;
-	}
-	if (!embed.thumbnailUrl.empty()) result["thumbnail"] = { { "url", embed.thumbnailUrl } };
-	if (!embed.imageUrl.empty()) result["image"] = { { "url", embed.imageUrl } };
-	if (!embed.fields.empty())
-	{
-		result["fields"] = DiscordJson::array();
-		for (const auto& field : embed.fields)
-		{
-			result["fields"].push_back({
-				{ "name", field.name },
-				{ "value", field.value },
-				{ "inline", field.inlineField }
-			});
-		}
-	}
-	return result;
-}
-
-std::string messagePayload(const std::string& content, const EmbedData* embed)
+std::string messagePayload(const std::string& content, const DiscordBuilders::Embed* embed)
 {
 	DiscordJson body = DiscordJson::object();
 	if (!content.empty()) body["content"] = content;
-	if (embed) body["embeds"] = DiscordJson::array({ embedToJson(*embed) });
+	if (embed) body["embeds"] = DiscordJson::array({ embed->toJson() });
 	return body.dump();
 }
 
-void completeMessageResponse(const std::string& responseBody,
-	const std::shared_ptr<PreparedPawnCallback>& callback, bool cacheWithoutCallback)
+void completeMessageResponse(bool success, const std::string& responseBody,
+	const std::shared_ptr<PreparedPawnCallback>& callback)
 {
-	if (!callback && !cacheWithoutCallback) return;
+	if (!callback) return;
 	DiscordBridgeComponent* bridge = component();
 	if (!bridge) return;
-	DiscordMessage* created = bridge->upsertMessageFromJson(responseBody);
-	if (!created) return;
 
-	const std::string createdMessageId(created->getMessageId().data(), created->getMessageId().length());
-	if (callback)
+	cell handle = 0;
+	std::string createdMessageId;
+	if (success)
 	{
-		// DCC_GetCreatedMessage() is only valid while the callback is running.
-		// Cleanup must happen after the callback; deleting the temporary message
-		// first makes DCC_CacheChannelMessage callbacks observe an invalid handle.
-		g_createdMessageHandle = assignMessageHandle(created->getMessageId());
-		executePawnCallback(*callback);
+		if (DiscordMessage* created = bridge->upsertMessageFromJson(responseBody))
+		{
+			createdMessageId.assign(created->getMessageId().data(), created->getMessageId().length());
+			handle = assignMessageHandle(created->getMessageId());
+			rememberMessageChannel(handle, created->getChannelId());
+		}
 	}
-	if (auto* current = static_cast<DiscordMessage*>(bridge->findMessageById(createdMessageId));
-		current && !current->isPersistent())
+	executePawnCallback(*callback, { handle });
+	// A REST-created message stays cached only while its callback runs, unless
+	// the script marked it with DBR_SetMessagePersistent.  The handle keeps
+	// working for message actions because its channel id is remembered.
+	if (!createdMessageId.empty())
 	{
-		bridge->removeMessage(createdMessageId);
+		if (auto* current = static_cast<DiscordMessage*>(bridge->findMessageById(createdMessageId));
+			current && !current->isPersistent())
+		{
+			bridge->removeMessage(createdMessageId);
+		}
 	}
-	if (callback) g_createdMessageHandle = 0;
 }
 
 DiscordChannel* resolveChannelByHandle(cell handle)
@@ -963,6 +647,62 @@ std::string channelIdForHandle(cell handle)
 {
 	const auto it = g_channelHandleToId.find(handle);
 	return it == g_channelHandleToId.end() ? std::string() : it->second;
+}
+
+std::string userIdForHandle(cell handle)
+{
+	const auto it = g_userHandleToId.find(handle);
+	return it == g_userHandleToId.end() ? std::string() : it->second;
+}
+
+std::string guildIdForHandle(cell handle)
+{
+	const auto it = g_guildHandleToId.find(handle);
+	return it == g_guildHandleToId.end() ? std::string() : it->second;
+}
+
+std::string roleIdForHandle(cell handle)
+{
+	const auto it = g_roleHandleToId.find(handle);
+	return it == g_roleHandleToId.end() ? std::string() : it->second;
+}
+
+void rememberChannelGuild(cell channelHandle, StringView guildId)
+{
+	if (channelHandle != 0 && !guildId.empty())
+	{
+		g_channelHandleToGuildId[channelHandle] = std::string(guildId.data(), guildId.length());
+	}
+}
+
+void rememberMessageChannel(cell handle, StringView channelId)
+{
+	if (handle != 0 && !channelId.empty())
+	{
+		g_messageHandleToChannelId[handle] = std::string(channelId.data(), channelId.length());
+	}
+}
+
+bool messageRefForHandle(cell handle, std::string& channelId, std::string& messageId)
+{
+	channelId.clear();
+	messageId.clear();
+	const auto it = g_messageHandleToId.find(handle);
+	if (it == g_messageHandleToId.end()) return false;
+	messageId = it->second;
+	if (DiscordBridgeComponent* bridge = component())
+	{
+		if (auto* message = static_cast<DiscordMessage*>(bridge->findMessageById(messageId)))
+		{
+			channelId.assign(message->getChannelId().data(), message->getChannelId().length());
+		}
+	}
+	if (channelId.empty())
+	{
+		const auto channelIt = g_messageHandleToChannelId.find(handle);
+		if (channelIt != g_messageHandleToChannelId.end()) channelId = channelIt->second;
+	}
+	return !channelId.empty();
 }
 
 bool isDiscordSnowflake(const std::string& value)
@@ -1027,11 +767,6 @@ std::string resolveEmojiToken(cell handle)
 	return it == g_emojiHandleToToken.end() ? std::string() : it->second;
 }
 
-cell AMX_NATIVE_CALL Native_InvalidRegistration(AMX*, cell*)
-{
-	return 0;
-}
-
 cell AMX_NATIVE_CALL Native_ConnectDiscordBot(AMX* amx, cell* params)
 {
 	if (params[0] < static_cast<cell>(2 * sizeof(cell)))
@@ -1040,13 +775,58 @@ cell AMX_NATIVE_CALL Native_ConnectDiscordBot(AMX* amx, cell* params)
 	}
 
 	const std::string token = getAmxString(amx, params[1]);
-	const int intents = (params[0] >= static_cast<cell>(3 * sizeof(cell))) ? static_cast<int>(params[2]) : DCC_DEFAULT_INTENTS;
+	// DBR_ConnectBot(token[], DiscordIntent:intents) has two parameters.
+	const int intents = nativeParamCount(params) >= 2 ? static_cast<int>(params[2]) : DISCORD_DEFAULT_INTENTS;
+	DiscordBridgeComponent* bridge = component();
+	if (!bridge)
+	{
+		return 0;
+	}
+
+	// A token outside the script (environment variable or server
+	// configuration) always wins, whichever of the two loads first.
+	bridge->loadConfiguration();
+	// DBR_DisconnectBot followed by DBR_ConnectBot in the same tick: reconnect
+	// once the old bot has been torn down.
+	if (bridge->isDisconnectPending())
+	{
+		if (!bridge->hasConfiguredToken() && token.empty()) return 0;
+		bridge->queueReconnect(token, intents);
+		return 1;
+	}
+	if (bridge->hasConfiguredToken())
+	{
+		if (!g_connectIgnoredWarned)
+		{
+			g_connectIgnoredWarned = true;
+			logWarning("[DiscordBridge] DBR_ConnectBot was ignored: the token set in DISCORD_BOT_TOKEN or the server "
+				"configuration (discord_bot_token) takes priority. Choose the intents there with discord_bot_intents.");
+		}
+		return bridge->connectConfiguredBot() ? 1 : 0;
+	}
 	if (token.empty())
 	{
 		return 0;
 	}
 
-	return component()->connectBot(token, intents) ? 1 : 0;
+	return bridge->connectBot(token, intents) ? 1 : 0;
+}
+
+cell AMX_NATIVE_CALL Native_DisconnectBot(AMX*, cell*)
+{
+	DiscordBridgeComponent* bridge = component();
+	return bridge && bridge->requestDisconnect() ? 1 : 0;
+}
+
+cell AMX_NATIVE_CALL Native_SetDebugMode(AMX*, cell* params)
+{
+	g_debugMode = nativeParamCount(params) >= 1 && params[1] != 0;
+	return 1;
+}
+
+cell AMX_NATIVE_CALL Native_IsDebugMode(AMX*, cell*)
+{
+	return g_debugMode ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_IsDiscordConnected(AMX*, cell*)
@@ -1055,17 +835,16 @@ cell AMX_NATIVE_CALL Native_IsDiscordConnected(AMX*, cell*)
 	return (bot && bot->isConnected()) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_FindChannelById(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_FindChannelById(AMX* amx, cell* params)
 {
 	const std::string channelId = getAmxString(amx, params[1]);
-	// Preserve the old connector's stable-handle behavior for scripts that
-	// resolve IDs during OnGameModeInit. The actual channel object may arrive
-	// later through GUILD_CREATE, but the ID handle is already safe to queue
-	// outbound work against.
+	// Handles are backed by the snowflake, so scripts can resolve IDs during
+	// OnGameModeInit.  The channel object may arrive later through GUILD_CREATE,
+	// but the handle is already safe to queue outbound work against.
 	return isDiscordSnowflake(channelId) ? assignChannelHandle(channelId) : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_FindChannelByName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_FindChannelByName(AMX* amx, cell* params)
 {
 	const std::string name = getAmxString(amx, params[1]);
 	auto* channel = static_cast<DiscordChannel*>(component()->findChannelByName(name));
@@ -1098,7 +877,7 @@ cell AMX_NATIVE_CALL Native_FindDiscordConfiguredChannel(AMX*, cell*)
 	return assignChannelHandle(channel->getChannelId());
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetChannelId(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetChannelId(AMX* amx, cell* params)
 {
 	if (params[0] < static_cast<cell>(3 * sizeof(cell)))
 	{
@@ -1121,7 +900,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetChannelId(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], channelId, maxSize) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetChannelName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetChannelName(AMX* amx, cell* params)
 {
 	if (params[0] < static_cast<cell>(3 * sizeof(cell)))
 	{
@@ -1140,7 +919,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetChannelName(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], name, maxSize) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetChannelTopic(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetChannelTopic(AMX* amx, cell* params)
 {
 	if (params[0] < static_cast<cell>(3 * sizeof(cell)))
 	{
@@ -1159,7 +938,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetChannelTopic(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], topic, maxSize) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetChannelType(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetChannelType(AMX* amx, cell* params)
 {
 	DiscordChannel* channel = resolveChannelByHandle(params[1]);
 	if (!channel)
@@ -1177,43 +956,27 @@ cell AMX_NATIVE_CALL Native_DCC_GetChannelType(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SendChannelMessage(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SendChannelMessage(AMX* amx, cell* params)
 {
 	const std::string channelId = channelIdForHandle(params[1]);
-	if (channelId.empty())
-	{
-		return 0;
-	}
-
 	const std::string message = getAmxString(amx, params[2]);
-	if (message.size() > 2000)
-	{
-		return 0;
-	}
-	const size_t supplied = params[0] > 0 ? static_cast<size_t>(params[0]) / sizeof(cell) : 0;
+	if (channelId.empty() || message.empty() || message.size() > 2000) return 0;
 	std::shared_ptr<PreparedPawnCallback> callback;
-	// The friendly SendDiscordChannelMessage native has only two parameters.
-	// Do not inspect the optional DCC callback slots unless the caller actually
-	// supplied the legacy callback/format arguments.
-	if (supplied > 2)
-	{
-		if (supplied < 4 || !capturePawnCallback(amx, params[3], params[4], params, 5, callback)) return 0;
-	}
-	DiscordBot* bot = component() && component()->getBot() ? static_cast<DiscordBot*>(component()->getBot()) : nullptr;
+	if (nativeParamCount(params) >= 4 && !capturePawnCallback(amx, params[3], params[4], params, 5, callback)) return 0;
+	DiscordBot* bot = nativeBot();
 	if (!bot) return 0;
-	if (!bot->submitRestTask([bot, channelId, message, callback](DiscordHTTP& http) mutable
+	return bot->submitRestTask([bot, channelId, message, callback](DiscordHTTP& http)
 	{
 		const auto response = http.sendMessage(channelId, message);
-		if (!response.success || !callback) return;
+		if (!callback) return;
 		bot->enqueueCompletion([response, callback]()
 		{
-			completeMessageResponse(response.body, callback, false);
+			completeMessageResponse(response.success, response.body, callback);
 		});
-	})) return 0;
-	return 1;
+	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetChannelName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetChannelName(AMX* amx, cell* params)
 {
 	const std::string channelId = channelIdForHandle(params[1]);
 	const std::string name = getAmxString(amx, params[2]);
@@ -1231,7 +994,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetChannelName(AMX* amx, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetChannelTopic(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetChannelTopic(AMX* amx, cell* params)
 {
 	const std::string channelId = channelIdForHandle(params[1]);
 	const std::string topic = getAmxString(amx, params[2]);
@@ -1249,7 +1012,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetChannelTopic(AMX* amx, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_DeleteChannel(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_DeleteChannel(AMX* amx, cell* params)
 {
 	(void)amx;
 	const std::string channelId = channelIdForHandle(params[1]);
@@ -1261,16 +1024,16 @@ cell AMX_NATIVE_CALL Native_DCC_DeleteChannel(AMX* amx, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_FindUserById(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_FindUserById(AMX* amx, cell* params)
 {
 	const std::string userId = getAmxString(amx, params[1]);
 	return isDiscordSnowflake(userId) ? assignUserHandle(userId) : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_FindUserByName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_FindUserByName(AMX* amx, cell* params)
 {
 	const std::string name = getAmxString(amx, params[1]);
-	const std::string disc = getAmxString(amx, params[2]);
+	const std::string disc = nativeParamCount(params) >= 2 ? getAmxString(amx, params[2]) : std::string();
 
 	auto* user = component()->findUserByNameAndDiscriminator(name, disc);
 	if (!user)
@@ -1281,7 +1044,7 @@ cell AMX_NATIVE_CALL Native_DCC_FindUserByName(AMX* amx, cell* params)
 	return assignUserHandle(user->getUserId());
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetUserId(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetUserId(AMX* amx, cell* params)
 {
 	const auto it = g_userHandleToId.find(params[1]);
 	if (it == g_userHandleToId.end())
@@ -1291,7 +1054,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetUserId(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], it->second, params[3]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetUserName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetUserName(AMX* amx, cell* params)
 {
 	DiscordUser* user = resolveUserByHandle(params[1]);
 	if (!user)
@@ -1302,18 +1065,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetUserName(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], name, params[3]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetUserDiscriminator(AMX* amx, cell* params)
-{
-	DiscordUser* user = resolveUserByHandle(params[1]);
-	if (!user)
-	{
-		return 0;
-	}
-	const std::string disc(user->getDiscriminator().data(), user->getDiscriminator().length());
-	return setAmxString(amx, params[2], disc, params[3]) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_IsUserBot(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_IsUserBot(AMX* amx, cell* params)
 {
 	DiscordUser* user = resolveUserByHandle(params[1]);
 	if (!user)
@@ -1329,13 +1081,13 @@ cell AMX_NATIVE_CALL Native_DCC_IsUserBot(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_FindGuildById(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_FindGuildById(AMX* amx, cell* params)
 {
 	const std::string guildId = getAmxString(amx, params[1]);
 	return isDiscordSnowflake(guildId) ? assignGuildHandle(guildId) : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_FindGuildByName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_FindGuildByName(AMX* amx, cell* params)
 {
 	const std::string name = getAmxString(amx, params[1]);
 	auto* guild = static_cast<DiscordGuild*>(component()->findGuildByName(name));
@@ -1346,7 +1098,7 @@ cell AMX_NATIVE_CALL Native_DCC_FindGuildByName(AMX* amx, cell* params)
 	return assignGuildHandle(guild->getGuildId());
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildId(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildId(AMX* amx, cell* params)
 {
 	const auto it = g_guildHandleToId.find(params[1]);
 	if (it == g_guildHandleToId.end())
@@ -1356,7 +1108,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildId(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], it->second, params[3]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildName(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = resolveGuildByHandle(params[1]);
 	if (!guild)
@@ -1367,7 +1119,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildName(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], name, params[3]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildOwnerId(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildOwnerId(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = resolveGuildByHandle(params[1]);
 	if (!guild)
@@ -1378,29 +1130,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildOwnerId(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], owner, params[3]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_CacheChannelMessage(AMX* amx, cell* params)
-{
-	const std::string channelId = getAmxString(amx, params[1]);
-	const std::string messageId = getAmxString(amx, params[2]);
-	if (channelId.empty() || messageId.empty()) return 0;
-	std::shared_ptr<PreparedPawnCallback> callback;
-	if (!capturePawnCallback(amx, params[3], params[4], params, 5, callback)) return 0;
-	if (component()->findMessageById(messageId)) return 0;
-	DiscordBot* bot = component() && component()->getBot() ? static_cast<DiscordBot*>(component()->getBot()) : nullptr;
-	if (!bot) return 0;
-	if (!bot->submitRestTask([bot, channelId, messageId, callback](DiscordHTTP& http)
-	{
-		const auto response = http.getMessage(channelId, messageId);
-		if (!response.success) return;
-		bot->enqueueCompletion([response, callback]()
-		{
-			completeMessageResponse(response.body, callback, true);
-		});
-	})) return 0;
-	return 1;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_GetMessageId(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetMessageId(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	if (!message)
@@ -1411,7 +1141,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetMessageId(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], id, params[3]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetMessageChannel(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetMessageChannel(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	if (!message)
@@ -1429,7 +1159,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetMessageChannel(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetMessageAuthor(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetMessageAuthor(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	if (!message)
@@ -1453,7 +1183,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetMessageAuthor(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetMessageContent(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetMessageContent(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	if (!message)
@@ -1464,7 +1194,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetMessageContent(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], content, params[3]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_IsMessageTts(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_IsMessageTts(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	if (!message)
@@ -1480,7 +1210,7 @@ cell AMX_NATIVE_CALL Native_DCC_IsMessageTts(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_IsMessageMentioningEveryone(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_IsMessageMentioningEveryone(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	if (!message)
@@ -1496,48 +1226,48 @@ cell AMX_NATIVE_CALL Native_DCC_IsMessageMentioningEveryone(AMX* amx, cell* para
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_DeleteMessage(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_DeleteMessage(AMX*, cell* params)
 {
-	DiscordMessage* message = resolveMessageByHandle(params[1]);
-	if (!message)
+	std::string channelId;
+	std::string messageId;
+	DiscordBot* bot = nativeBot();
+	if (!bot || !messageRefForHandle(params[1], channelId, messageId)) return 0;
+	return bot->submitRestTask([channelId, messageId](DiscordHTTP& http)
 	{
-		return 0;
-	}
-	return message->deleteMessage() ? 1 : 0;
+		http.deleteMessage(channelId, messageId);
+	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_EditMessage(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_EditMessage(AMX* amx, cell* params)
 {
-	DiscordMessage* message = resolveMessageByHandle(params[1]);
-	if (!message)
-	{
-		return 0;
-	}
+	std::string channelId;
+	std::string messageId;
+	DiscordBot* bot = nativeBot();
+	if (!bot || !messageRefForHandle(params[1], channelId, messageId)) return 0;
 	const std::string content = getAmxString(amx, params[2]);
 	if (content.size() > 2000) return 0;
-	if (params[3] == 0) return message->editMessage(content) ? 1 : 0;
-	const auto embedIt = g_embeds.find(params[3]);
-	if (embedIt == g_embeds.end()) return 0;
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-	const std::string channelId(message->getChannelId().data(), message->getChannelId().length());
-	const std::string messageId(message->getMessageId().data(), message->getMessageId().length());
-	const std::string body = messagePayload(content, &embedIt->second);
+	auto embedIt = g_embeds.end();
+	if (params[3] != 0)
+	{
+		embedIt = g_embeds.find(params[3]);
+		if (embedIt == g_embeds.end()) return 0;
+	}
+	const std::string body = messagePayload(content, embedIt == g_embeds.end() ? nullptr : &embedIt->second);
 	const bool queued = bot->submitRestTask([channelId, messageId, body](DiscordHTTP& http)
 	{
 		http.editMessagePayload(channelId, messageId, body);
 	});
-	if (queued) g_embeds.erase(embedIt);
+	if (queued && embedIt != g_embeds.end()) g_embeds.erase(embedIt);
 	return queued ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_FindRoleById(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_FindRoleById(AMX* amx, cell* params)
 {
 	const std::string roleId = getAmxString(amx, params[1]);
 	return isDiscordSnowflake(roleId) ? assignRoleHandle(roleId) : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_FindRoleByName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_FindRoleByName(AMX* amx, cell* params)
 {
 	const cell guildHandle = params[1];
 	const std::string roleName = getAmxString(amx, params[2]);
@@ -1561,7 +1291,7 @@ cell AMX_NATIVE_CALL Native_DCC_FindRoleByName(AMX* amx, cell* params)
 	return assignRoleHandle(role->getRoleId());
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetRoleId(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetRoleId(AMX* amx, cell* params)
 {
 	const auto it = g_roleHandleToId.find(params[1]);
 	if (it == g_roleHandleToId.end())
@@ -1571,7 +1301,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetRoleId(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], it->second, params[3]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetRoleName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetRoleName(AMX* amx, cell* params)
 {
 	DiscordRole* role = resolveRoleByHandle(params[1]);
 	if (!role)
@@ -1582,7 +1312,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetRoleName(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], name, params[3]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetRoleColor(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetRoleColor(AMX* amx, cell* params)
 {
 	DiscordRole* role = resolveRoleByHandle(params[1]);
 	if (!role)
@@ -1598,7 +1328,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetRoleColor(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetRolePermissions(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetRolePermissions(AMX* amx, cell* params)
 {
 	DiscordRole* role = resolveRoleByHandle(params[1]);
 	cell* high = nullptr;
@@ -1618,7 +1348,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetRolePermissions(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_IsRoleHoist(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_IsRoleHoist(AMX* amx, cell* params)
 {
 	DiscordRole* role = resolveRoleByHandle(params[1]);
 	if (!role)
@@ -1634,7 +1364,7 @@ cell AMX_NATIVE_CALL Native_DCC_IsRoleHoist(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetRolePosition(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetRolePosition(AMX* amx, cell* params)
 {
 	DiscordRole* role = resolveRoleByHandle(params[1]);
 	if (!role)
@@ -1650,7 +1380,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetRolePosition(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_IsRoleMentionable(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_IsRoleMentionable(AMX* amx, cell* params)
 {
 	DiscordRole* role = resolveRoleByHandle(params[1]);
 	if (!role)
@@ -1666,7 +1396,7 @@ cell AMX_NATIVE_CALL Native_DCC_IsRoleMentionable(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_CreateEmoji(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_CreateEmoji(AMX* amx, cell* params)
 {
 	const std::string name = getAmxString(amx, params[1]);
 	const std::string snowflake = getAmxString(amx, params[2]);
@@ -1677,13 +1407,13 @@ cell AMX_NATIVE_CALL Native_DCC_CreateEmoji(AMX* amx, cell* params)
 	return CreateDiscordEmojiHandle(name, snowflake);
 }
 
-cell AMX_NATIVE_CALL Native_DCC_DeleteEmoji(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_DeleteEmoji(AMX* amx, cell* params)
 {
 	const cell handle = params[1];
 	return g_emojiHandleToToken.erase(handle) > 0 ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetEmojiName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetEmojiName(AMX* amx, cell* params)
 {
 	const std::string token = resolveEmojiToken(params[1]);
 	if (token.empty())
@@ -1696,38 +1426,28 @@ cell AMX_NATIVE_CALL Native_DCC_GetEmojiName(AMX* amx, cell* params)
 	return static_cast<cell>(name.length());
 }
 
-cell AMX_NATIVE_CALL Native_DCC_CreateReaction(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_CreateReaction(AMX*, cell* params)
 {
-	DiscordMessage* message = resolveMessageByHandle(params[1]);
-	if (!message)
-	{
-		return 0;
-	}
+	std::string channelId;
+	std::string messageId;
+	DiscordBot* bot = nativeBot();
 	const std::string token = resolveEmojiToken(params[2]);
-	if (token.empty())
+	if (!bot || token.empty() || !messageRefForHandle(params[1], channelId, messageId)) return 0;
+	const bool queued = bot->submitRestTask([channelId, messageId, token](DiscordHTTP& http)
 	{
-		return 0;
-	}
-	const bool success = message->addReaction(token);
-	// DCC_CreateReaction consumes the temporary emoji handle just like the
-	// legacy connector did.  Keeping it alive makes later callbacks observe a
-	// handle that should already be invalid.
+		http.addReaction(channelId, messageId, token);
+	});
+	// Creating a reaction consumes the temporary emoji handle.
 	DeleteDiscordEmojiHandle(params[2]);
-	return success ? 1 : 0;
+	return queued ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_DeleteMessageReaction(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_DeleteMessageReaction(AMX*, cell* params)
 {
-	DiscordMessage* message = resolveMessageByHandle(params[1]);
-	if (!message)
-	{
-		return 0;
-	}
+	std::string channelId;
+	std::string messageId;
 	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-
-	const std::string channelId(message->getChannelId().data(), message->getChannelId().length());
-	const std::string messageId(message->getMessageId().data(), message->getMessageId().length());
+	if (!bot || !messageRefForHandle(params[1], channelId, messageId)) return 0;
 	const cell emojiHandle = params[2];
 	if (emojiHandle == 0)
 	{
@@ -1737,152 +1457,10 @@ cell AMX_NATIVE_CALL Native_DCC_DeleteMessageReaction(AMX* amx, cell* params)
 		}) ? 1 : 0;
 	}
 	const std::string token = resolveEmojiToken(emojiHandle);
-	if (token.empty())
-	{
-		return 0;
-	}
+	if (token.empty()) return 0;
 	return bot->submitRestTask([channelId, messageId, token](DiscordHTTP& http)
 	{
 		http.deleteEmojiReactions(channelId, messageId, token);
-	}) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_AddGuildMemberRole(AMX* amx, cell* params)
-{
-	auto guildIt = g_guildHandleToId.find(params[1]);
-	auto userIt = g_userHandleToId.find(params[2]);
-	auto roleIt = g_roleHandleToId.find(params[3]);
-	if (guildIt == g_guildHandleToId.end() || userIt == g_userHandleToId.end() || roleIt == g_roleHandleToId.end())
-	{
-		return 0;
-	}
-
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-	const std::string guildId = guildIt->second;
-	const std::string userId = userIt->second;
-	const std::string roleId = roleIt->second;
-	return bot->submitRestTask([guildId, userId, roleId](DiscordHTTP& http)
-	{
-		http.addGuildMemberRole(guildId, userId, roleId);
-	}) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_RemoveGuildMemberRole(AMX* amx, cell* params)
-{
-	auto guildIt = g_guildHandleToId.find(params[1]);
-	auto userIt = g_userHandleToId.find(params[2]);
-	auto roleIt = g_roleHandleToId.find(params[3]);
-	if (guildIt == g_guildHandleToId.end() || userIt == g_userHandleToId.end() || roleIt == g_roleHandleToId.end())
-	{
-		return 0;
-	}
-
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-	const std::string guildId = guildIt->second;
-	const std::string userId = userIt->second;
-	const std::string roleId = roleIt->second;
-	return bot->submitRestTask([guildId, userId, roleId](DiscordHTTP& http)
-	{
-		http.removeGuildMemberRole(guildId, userId, roleId);
-	}) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_SetGuildMemberNickname(AMX* amx, cell* params)
-{
-	auto guildIt = g_guildHandleToId.find(params[1]);
-	auto userIt = g_userHandleToId.find(params[2]);
-	if (guildIt == g_guildHandleToId.end() || userIt == g_userHandleToId.end())
-	{
-		return 0;
-	}
-	const std::string nick = getAmxString(amx, params[3]);
-	const std::string body = std::string("{") + DiscordUtils::buildJsonPair("nick", nick) + "}";
-
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-	const std::string guildId = guildIt->second;
-	const std::string userId = userIt->second;
-	return bot->submitRestTask([guildId, userId, body](DiscordHTTP& http)
-	{
-		http.modifyGuildMember(guildId, userId, body);
-	}) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_SetGuildMemberVoiceChannel(AMX* amx, cell* params)
-{
-	auto guildIt = g_guildHandleToId.find(params[1]);
-	auto userIt = g_userHandleToId.find(params[2]);
-	auto channelIt = g_channelHandleToId.find(params[3]);
-	if (guildIt == g_guildHandleToId.end() || userIt == g_userHandleToId.end() || channelIt == g_channelHandleToId.end())
-	{
-		return 0;
-	}
-	const std::string body = std::string("{") + DiscordUtils::buildJsonPair("channel_id", channelIt->second) + "}";
-
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-	const std::string guildId = guildIt->second;
-	const std::string userId = userIt->second;
-	return bot->submitRestTask([guildId, userId, body](DiscordHTTP& http)
-	{
-		http.modifyGuildMember(guildId, userId, body);
-	}) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_RemoveGuildMember(AMX* amx, cell* params)
-{
-	auto guildIt = g_guildHandleToId.find(params[1]);
-	auto userIt = g_userHandleToId.find(params[2]);
-	if (guildIt == g_guildHandleToId.end() || userIt == g_userHandleToId.end())
-	{
-		return 0;
-	}
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-	const std::string guildId = guildIt->second;
-	const std::string userId = userIt->second;
-	return bot->submitRestTask([guildId, userId](DiscordHTTP& http)
-	{
-		http.removeGuildMember(guildId, userId);
-	}) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_CreateGuildMemberBan(AMX* amx, cell* params)
-{
-	auto guildIt = g_guildHandleToId.find(params[1]);
-	auto userIt = g_userHandleToId.find(params[2]);
-	if (guildIt == g_guildHandleToId.end() || userIt == g_userHandleToId.end())
-	{
-		return 0;
-	}
-	const std::string reason = getAmxString(amx, params[3]);
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-	const std::string guildId = guildIt->second;
-	const std::string userId = userIt->second;
-	return bot->submitRestTask([guildId, userId, reason](DiscordHTTP& http)
-	{
-		http.createGuildMemberBan(guildId, userId, reason);
-	}) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_RemoveGuildMemberBan(AMX* amx, cell* params)
-{
-	auto guildIt = g_guildHandleToId.find(params[1]);
-	auto userIt = g_userHandleToId.find(params[2]);
-	if (guildIt == g_guildHandleToId.end() || userIt == g_userHandleToId.end())
-	{
-		return 0;
-	}
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-	const std::string guildId = guildIt->second;
-	const std::string userId = userIt->second;
-	return bot->submitRestTask([guildId, userId](DiscordHTTP& http)
-	{
-		http.removeGuildMemberBan(guildId, userId);
 	}) ? 1 : 0;
 }
 
@@ -1908,7 +1486,7 @@ DiscordRole* roleForHandle(cell handle)
 	return resolveRoleByHandle(handle);
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetChannelGuild(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetChannelGuild(AMX* amx, cell* params)
 {
 	DiscordChannel* channel = resolveChannelByHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -1930,7 +1508,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetChannelGuild(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetChannelPosition(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetChannelPosition(AMX* amx, cell* params)
 {
 	DiscordChannel* channel = resolveChannelByHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -1939,7 +1517,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetChannelPosition(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_IsChannelNsfw(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_IsChannelNsfw(AMX* amx, cell* params)
 {
 	DiscordChannel* channel = resolveChannelByHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -1948,7 +1526,7 @@ cell AMX_NATIVE_CALL Native_DCC_IsChannelNsfw(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetChannelParentCategory(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetChannelParentCategory(AMX* amx, cell* params)
 {
 	DiscordChannel* channel = resolveChannelByHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -1958,7 +1536,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetChannelParentCategory(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetChannelPosition(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetChannelPosition(AMX*, cell* params)
 {
 	const std::string channelId = channelIdForHandle(params[1]);
 	DiscordBot* bot = nativeBot();
@@ -1970,7 +1548,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetChannelPosition(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetChannelNsfw(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetChannelNsfw(AMX*, cell* params)
 {
 	const std::string channelId = channelIdForHandle(params[1]);
 	DiscordBot* bot = nativeBot();
@@ -1982,7 +1560,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetChannelNsfw(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetChannelParentCategory(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetChannelParentCategory(AMX*, cell* params)
 {
 	const std::string channelId = channelIdForHandle(params[1]);
 	const std::string parentId = channelIdForHandle(params[2]);
@@ -1996,12 +1574,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetChannelParentCategory(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetCreatedMessage(AMX*, cell*)
-{
-	return g_createdMessageHandle;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_GetMessageUserMentionCount(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetMessageUserMentionCount(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -2010,7 +1583,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetMessageUserMentionCount(AMX* amx, cell* param
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetMessageUserMention(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetMessageUserMention(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	cell* out = nativeRef(amx, params[3]);
@@ -2019,7 +1592,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetMessageUserMention(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetMessageRoleMentionCount(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetMessageRoleMentionCount(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -2028,7 +1601,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetMessageRoleMentionCount(AMX* amx, cell* param
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetMessageRoleMention(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetMessageRoleMention(AMX* amx, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	cell* out = nativeRef(amx, params[3]);
@@ -2037,7 +1610,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetMessageRoleMention(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_IsUserVerified(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_IsUserVerified(AMX* amx, cell* params)
 {
 	DiscordUser* user = resolveUserByHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -2046,7 +1619,7 @@ cell AMX_NATIVE_CALL Native_DCC_IsUserVerified(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildRole(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildRole(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	cell* out = nativeRef(amx, params[3]);
@@ -2057,7 +1630,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildRole(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildRoleCount(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildRoleCount(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -2066,7 +1639,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildRoleCount(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildMember(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildMember(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	cell* out = nativeRef(amx, params[3]);
@@ -2078,7 +1651,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildMember(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberCount(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildMemberCount(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -2087,7 +1660,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberCount(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberVoiceChannel(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildMemberVoiceChannel(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordUser* user = resolveUserByHandle(params[2]);
@@ -2100,7 +1673,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberVoiceChannel(AMX* amx, cell* param
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberNickname(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildMemberNickname(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordUser* user = resolveUserByHandle(params[2]);
@@ -2110,7 +1683,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberNickname(AMX* amx, cell* params)
 	return setAmxString(amx, params[3], member->nickname, params[4]) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberRole(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildMemberRole(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordUser* user = resolveUserByHandle(params[2]);
@@ -2122,7 +1695,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberRole(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberRoleCount(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildMemberRoleCount(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordUser* user = resolveUserByHandle(params[2]);
@@ -2134,7 +1707,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberRoleCount(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_HasGuildMemberRole(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_HasGuildMemberRole(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordUser* user = resolveUserByHandle(params[2]);
@@ -2148,7 +1721,7 @@ cell AMX_NATIVE_CALL Native_DCC_HasGuildMemberRole(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberStatus(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildMemberStatus(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordUser* user = resolveUserByHandle(params[2]);
@@ -2160,7 +1733,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildMemberStatus(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildChannel(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildChannel(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	cell* out = nativeRef(amx, params[3]);
@@ -2171,7 +1744,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildChannel(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetGuildChannelCount(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetGuildChannelCount(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	cell* out = nativeRef(amx, params[2]);
@@ -2180,7 +1753,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetGuildChannelCount(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetAllGuilds(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_GetAllGuilds(AMX* amx, cell* params)
 {
 	cell* out = nativeRef(amx, params[1]);
 	if (!out || params[2] < 0) return 0;
@@ -2191,7 +1764,7 @@ cell AMX_NATIVE_CALL Native_DCC_GetAllGuilds(AMX* amx, cell* params)
 	return static_cast<cell>(count);
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetGuildName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetGuildName(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	if (!guild) return 0;
@@ -2200,46 +1773,33 @@ cell AMX_NATIVE_CALL Native_DCC_SetGuildName(AMX* amx, cell* params)
 	return guild->setName(name) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_CreateGuildChannel(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_CreateGuildChannel(AMX* amx, cell* params)
 {
-	DiscordGuild* guild = guildForHandle(params[1]);
-	if (!guild) return 0;
+	const std::string guildId = guildIdForHandle(params[1]);
 	const std::string name = getAmxString(amx, params[2]);
-	const int type = static_cast<int>(params[3]);
-	if (name.size() < 2 || name.size() > 100) return 0;
-	if (type != static_cast<int>(EDiscordChannelType::GuildCategory) &&
-		type != static_cast<int>(EDiscordChannelType::GuildText) &&
-		type != static_cast<int>(EDiscordChannelType::GuildVoice)) return 0;
+	const auto type = static_cast<EDiscordChannelType>(params[3]);
+	if (guildId.empty() || name.empty() || name.size() > 100) return 0;
+	if (type != EDiscordChannelType::GuildCategory && type != EDiscordChannelType::GuildText &&
+		type != EDiscordChannelType::GuildVoice && type != EDiscordChannelType::GuildNews &&
+		type != EDiscordChannelType::GuildStageVoice && type != EDiscordChannelType::GuildForum) return 0;
 	std::shared_ptr<PreparedPawnCallback> callback;
 	if (!capturePawnCallback(amx, params[4], params[5], params, 6, callback)) return 0;
-	DiscordBot* bot = component() && component()->getBot() ? static_cast<DiscordBot*>(component()->getBot()) : nullptr;
+	DiscordBot* bot = nativeBot();
 	if (!bot) return 0;
-	const std::string guildId(guild->getGuildId().data(), guild->getGuildId().length());
-	const std::string body = std::string("{") + DiscordUtils::buildJsonPair("name", name) + "," + DiscordUtils::buildJsonPair("type", static_cast<int64_t>(type)) + "}";
-	if (!bot->submitRestTask([bot, guildId, body, callback](DiscordHTTP& rest)
+	const std::string body = DiscordJson { { "name", name }, { "type", static_cast<int>(type) } }.dump();
+	return bot->submitRestTask([bot, guildId, body, callback](DiscordHTTP& rest)
 	{
 		const auto response = rest.createGuildChannel(guildId, body);
-		if (!response.success) return;
 		bot->enqueueCompletion([response, callback]()
 		{
 			DiscordBridgeComponent* bridge = component();
-			if (!bridge) return;
-			DiscordChannel* channel = bridge->upsertChannelFromJson(response.body);
-			if (!channel || !callback) return;
-			g_createdGuildChannelHandle = assignChannelHandle(channel->getChannelId());
-			executePawnCallback(*callback);
-			g_createdGuildChannelHandle = 0;
+			DiscordChannel* channel = response.success && bridge ? bridge->upsertChannelFromJson(response.body) : nullptr;
+			if (callback) executePawnCallback(*callback, { channel ? assignChannelHandle(channel->getChannelId()) : 0 });
 		});
-	})) return 0;
-	return 1;
+	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetCreatedGuildChannel(AMX*, cell*)
-{
-	return g_createdGuildChannelHandle;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_SetGuildRolePosition(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetGuildRolePosition(AMX*, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordRole* role = roleForHandle(params[2]);
@@ -2254,7 +1814,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetGuildRolePosition(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetGuildRoleName(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetGuildRoleName(AMX* amx, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordRole* role = roleForHandle(params[2]);
@@ -2270,7 +1830,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetGuildRoleName(AMX* amx, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetGuildRolePermissions(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetGuildRolePermissions(AMX*, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordRole* role = roleForHandle(params[2]);
@@ -2288,7 +1848,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetGuildRolePermissions(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetGuildRoleColor(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetGuildRoleColor(AMX*, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordRole* role = roleForHandle(params[2]);
@@ -2304,7 +1864,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetGuildRoleColor(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetGuildRoleHoist(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetGuildRoleHoist(AMX*, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordRole* role = roleForHandle(params[2]);
@@ -2320,7 +1880,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetGuildRoleHoist(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetGuildRoleMentionable(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetGuildRoleMentionable(AMX*, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordRole* role = roleForHandle(params[2]);
@@ -2336,42 +1896,29 @@ cell AMX_NATIVE_CALL Native_DCC_SetGuildRoleMentionable(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_CreateGuildRole(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_CreateGuildRole(AMX* amx, cell* params)
 {
-	DiscordGuild* guild = guildForHandle(params[1]);
-	if (!guild) return 0;
+	const std::string guildId = guildIdForHandle(params[1]);
 	const std::string name = getAmxString(amx, params[2]);
-	if (name.size() < 2 || name.size() > 100) return 0;
+	if (guildId.empty() || name.empty() || name.size() > 100) return 0;
 	std::shared_ptr<PreparedPawnCallback> callback;
 	if (!capturePawnCallback(amx, params[3], params[4], params, 5, callback)) return 0;
-	DiscordBot* bot = component() && component()->getBot() ? static_cast<DiscordBot*>(component()->getBot()) : nullptr;
+	DiscordBot* bot = nativeBot();
 	if (!bot) return 0;
-	const std::string guildId(guild->getGuildId().data(), guild->getGuildId().length());
-	const std::string body = std::string("{") + DiscordUtils::buildJsonPair("name", name) + "}";
-	if (!bot->submitRestTask([bot, guildId, body, callback](DiscordHTTP& rest)
+	const std::string body = DiscordJson { { "name", name } }.dump();
+	return bot->submitRestTask([bot, guildId, body, callback](DiscordHTTP& rest)
 	{
 		const auto response = rest.createGuildRole(guildId, body);
-		if (!response.success) return;
 		bot->enqueueCompletion([response, guildId, callback]()
 		{
 			DiscordBridgeComponent* bridge = component();
-			if (!bridge) return;
-			DiscordRole* role = bridge->upsertRoleFromJson(response.body, guildId);
-			if (!role || !callback) return;
-			g_createdGuildRoleHandle = assignRoleHandle(role->getRoleId());
-			executePawnCallback(*callback);
-			g_createdGuildRoleHandle = 0;
+			DiscordRole* role = response.success && bridge ? bridge->upsertRoleFromJson(response.body, guildId) : nullptr;
+			if (callback) executePawnCallback(*callback, { role ? assignRoleHandle(role->getRoleId()) : 0 });
 		});
-	})) return 0;
-	return 1;
+	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetCreatedGuildRole(AMX*, cell*)
-{
-	return g_createdGuildRoleHandle;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_DeleteGuildRole(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_DeleteGuildRole(AMX*, cell* params)
 {
 	DiscordGuild* guild = guildForHandle(params[1]);
 	DiscordRole* role = roleForHandle(params[2]);
@@ -2385,7 +1932,7 @@ cell AMX_NATIVE_CALL Native_DCC_DeleteGuildRole(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_DeleteInternalMessage(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_DeleteInternalMessage(AMX*, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	if (!message) return 0;
@@ -2393,7 +1940,7 @@ cell AMX_NATIVE_CALL Native_DCC_DeleteInternalMessage(AMX*, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetMessagePersistent(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetMessagePersistent(AMX*, cell* params)
 {
 	DiscordMessage* message = resolveMessageByHandle(params[1]);
 	if (!message) return 0;
@@ -2401,7 +1948,7 @@ cell AMX_NATIVE_CALL Native_DCC_SetMessagePersistent(AMX*, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_TriggerBotTypingIndicator(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_TriggerBotTypingIndicator(AMX*, cell* params)
 {
 	const std::string id = channelIdForHandle(params[1]);
 	DiscordBot* bot = nativeBot();
@@ -2412,91 +1959,27 @@ cell AMX_NATIVE_CALL Native_DCC_TriggerBotTypingIndicator(AMX*, cell* params)
 	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetBotPresenceStatus(AMX*, cell*)
+cell AMX_NATIVE_CALL Native_CreatePrivateChannel(AMX* amx, cell* params)
 {
-	DiscordBot* bot = component() && component()->getBot() ? static_cast<DiscordBot*>(component()->getBot()) : nullptr;
-	if (!bot) return 0;
-	const int status = bot->getPresenceStatus();
-	// DCC's public enum is online=1, idle=2, dnd=3, invisible=4, offline=5;
-	return status == 0 ? 1 : status == 2 ? 2 : status == 1 ? 3 : status == 3 ? 4 : 5;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_SetBotPresenceStatus(AMX*, cell* params)
-{
-	DiscordBot* bot = component() && component()->getBot() ? static_cast<DiscordBot*>(component()->getBot()) : nullptr;
-	if (!bot) return 0;
-	EDiscordPresenceStatus status;
-	switch (params[1])
-	{
-		case 1: status = EDiscordPresenceStatus::Online; break;
-		case 2: status = EDiscordPresenceStatus::Idle; break;
-		case 3: status = EDiscordPresenceStatus::DoNotDisturb; break;
-		case 4: status = EDiscordPresenceStatus::Invisible; break;
-		case 5: status = EDiscordPresenceStatus::Offline; break;
-		default: return 0;
-	}
-	return bot->setPresenceStatus(status) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_SetBotActivity(AMX* amx, cell* params)
-{
-	DiscordBot* bot = component() && component()->getBot() ? static_cast<DiscordBot*>(component()->getBot()) : nullptr;
-	if (!bot) return 0;
-	return bot->setActivity(EDiscordActivityType::Playing, getAmxString(amx, params[1])) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_SetBotNickname(AMX* amx, cell* params)
-{
-	DiscordGuild* guild = guildForHandle(params[1]);
-	DiscordBot* bot = nativeBot();
-	if (!guild || !bot || bot->getBotId().empty()) return 0;
-	const std::string nickname = getAmxString(amx, params[2]);
-	if (!nickname.empty() && (nickname.size() < 2 || nickname.size() > 32 ||
-		nickname == "discordtag" || nickname == "everyone" || nickname == "here" ||
-		nickname.front() == '@' || nickname.front() == '#' || nickname.front() == ':' ||
-		nickname.rfind("```", 0) == 0)) return 0;
-	const std::string guildId(guild->getGuildId().data(), guild->getGuildId().length());
-	const std::string botId(bot->getBotId().data(), bot->getBotId().length());
-	const std::string body = std::string("{") + DiscordUtils::buildJsonPair("nick", nickname) + "}";
-	return bot->submitRestTask([guildId, botId, body](DiscordHTTP& http)
-	{
-		http.modifyGuildMember(guildId, botId, body);
-	}) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_CreatePrivateChannel(AMX* amx, cell* params)
-{
-	DiscordUser* user = resolveUserByHandle(params[1]);
-	if (!user) return 0;
+	const std::string userId = userIdForHandle(params[1]);
+	if (userId.empty()) return 0;
 	std::shared_ptr<PreparedPawnCallback> callback;
 	if (!capturePawnCallback(amx, params[2], params[3], params, 4, callback)) return 0;
-	DiscordBot* bot = component() && component()->getBot() ? static_cast<DiscordBot*>(component()->getBot()) : nullptr;
+	DiscordBot* bot = nativeBot();
 	if (!bot) return 0;
-	const std::string userId(user->getUserId().data(), user->getUserId().length());
-	if (!bot->submitRestTask([bot, userId, callback](DiscordHTTP& rest)
+	return bot->submitRestTask([bot, userId, callback](DiscordHTTP& rest)
 	{
 		const auto response = rest.createDM(userId);
-		if (!response.success) return;
 		bot->enqueueCompletion([response, callback]()
 		{
 			DiscordBridgeComponent* bridge = component();
-			if (!bridge) return;
-			DiscordChannel* channel = bridge->upsertChannelFromJson(response.body);
-			if (!channel || !callback) return;
-			g_createdPrivateChannelHandle = assignChannelHandle(channel->getChannelId());
-			executePawnCallback(*callback);
-			g_createdPrivateChannelHandle = 0;
+			DiscordChannel* channel = response.success && bridge ? bridge->upsertChannelFromJson(response.body) : nullptr;
+			if (callback) executePawnCallback(*callback, { channel ? assignChannelHandle(channel->getChannelId()) : 0 });
 		});
-	})) return 0;
-	return 1;
+	}) ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_GetCreatedPrivateChannel(AMX*, cell*)
-{
-	return g_createdPrivateChannelHandle;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_EscapeMarkdown(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_EscapeMarkdown(AMX* amx, cell* params)
 {
 	const std::string source = getAmxString(amx, params[1]);
 	std::string escaped;
@@ -2518,9 +2001,9 @@ cell AMX_NATIVE_CALL Native_DCC_EscapeMarkdown(AMX* amx, cell* params)
 	return static_cast<cell>(escaped.size());
 }
 
-cell AMX_NATIVE_CALL Native_DCC_CreateEmbed(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_CreateEmbed(AMX* amx, cell* params)
 {
-	EmbedData embed;
+	DiscordBuilders::Embed embed;
 	embed.title = getAmxString(amx, params[1]);
 	embed.description = getAmxString(amx, params[2]);
 	embed.url = getAmxString(amx, params[3]);
@@ -2535,16 +2018,16 @@ cell AMX_NATIVE_CALL Native_DCC_CreateEmbed(AMX* amx, cell* params)
 	return handle;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_DeleteEmbed(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_DeleteEmbed(AMX*, cell* params)
 {
 	return g_embeds.erase(params[1]) > 0 ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_AddEmbedField(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_AddEmbedField(AMX* amx, cell* params)
 {
 	auto it = g_embeds.find(params[1]);
 	if (it == g_embeds.end()) return 0;
-	EmbedData::Field field;
+	DiscordBuilders::EmbedField field;
 	field.name = getAmxString(amx, params[2]);
 	field.value = getAmxString(amx, params[3]);
 	field.inlineField = params[4] != 0;
@@ -2553,37 +2036,37 @@ cell AMX_NATIVE_CALL Native_DCC_AddEmbedField(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetEmbedTitle(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetEmbedTitle(AMX* amx, cell* params)
 {
 	auto it = g_embeds.find(params[1]); if (it == g_embeds.end()) return 0;
 	it->second.title = getAmxString(amx, params[2]); return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetEmbedDescription(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetEmbedDescription(AMX* amx, cell* params)
 {
 	auto it = g_embeds.find(params[1]); if (it == g_embeds.end()) return 0;
 	it->second.description = getAmxString(amx, params[2]); return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetEmbedUrl(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetEmbedUrl(AMX* amx, cell* params)
 {
 	auto it = g_embeds.find(params[1]); if (it == g_embeds.end()) return 0;
 	it->second.url = getAmxString(amx, params[2]); return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetEmbedTimestamp(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetEmbedTimestamp(AMX* amx, cell* params)
 {
 	auto it = g_embeds.find(params[1]); if (it == g_embeds.end()) return 0;
 	it->second.timestamp = getAmxString(amx, params[2]); return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetEmbedColor(AMX*, cell* params)
+cell AMX_NATIVE_CALL Native_SetEmbedColor(AMX*, cell* params)
 {
 	auto it = g_embeds.find(params[1]); if (it == g_embeds.end()) return 0;
 	it->second.color = static_cast<int>(params[2]); return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetEmbedFooter(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetEmbedFooter(AMX* amx, cell* params)
 {
 	auto it = g_embeds.find(params[1]); if (it == g_embeds.end()) return 0;
 	it->second.footerText = getAmxString(amx, params[2]);
@@ -2591,19 +2074,19 @@ cell AMX_NATIVE_CALL Native_DCC_SetEmbedFooter(AMX* amx, cell* params)
 	return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetEmbedThumbnail(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetEmbedThumbnail(AMX* amx, cell* params)
 {
 	auto it = g_embeds.find(params[1]); if (it == g_embeds.end()) return 0;
 	it->second.thumbnailUrl = getAmxString(amx, params[2]); return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SetEmbedImage(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SetEmbedImage(AMX* amx, cell* params)
 {
 	auto it = g_embeds.find(params[1]); if (it == g_embeds.end()) return 0;
 	it->second.imageUrl = getAmxString(amx, params[2]); return 1;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_SendChannelEmbedMessage(AMX* amx, cell* params)
+cell AMX_NATIVE_CALL Native_SendChannelEmbedMessage(AMX* amx, cell* params)
 {
 	const std::string channelId = channelIdForHandle(params[1]);
 	const auto embedIt = g_embeds.find(params[2]);
@@ -2618,837 +2101,145 @@ cell AMX_NATIVE_CALL Native_DCC_SendChannelEmbedMessage(AMX* amx, cell* params)
 	const bool queued = bot->submitRestTask([bot, channelId, body, callback](DiscordHTTP& rest)
 	{
 		const auto response = rest.sendMessagePayload(channelId, body);
-		if (!response.success || !callback) return;
+		if (!callback) return;
 		bot->enqueueCompletion([response, callback]()
 		{
-			completeMessageResponse(response.body, callback, false);
+			completeMessageResponse(response.success, response.body, callback);
 		});
 	});
 	if (queued) g_embeds.erase(embedIt);
 	return queued ? 1 : 0;
 }
 
-cell AMX_NATIVE_CALL Native_DCC_CreateCommand(AMX* amx, cell* params)
+void appendCoreNatives(std::vector<AMX_NATIVE_INFO>& natives)
 {
-	const std::string name = getAmxString(amx, params[1]);
-	const std::string description = getAmxString(amx, params[2]);
-	const std::string callback = getAmxString(amx, params[3]);
-	if (name.empty() || name.size() > 32 || description.empty() || description.size() > 100 || callback.empty()) return 0;
-	NativePawnScript* callbackScript = findPawnScriptWithPublic(callback.c_str(), pawnScriptFor(amx));
-	if (!callbackScript)
-	{
-		logCommandWarning("[DiscordBridge] DCC_CreateCommand callback '" + callback + "' is not exported by any loaded Pawn script");
-	}
-	std::string guildId;
-	if (params[5] != 0)
-	{
-		auto guildIt = g_guildHandleToId.find(params[5]);
-		if (guildIt == g_guildHandleToId.end()) return 0;
-		guildId = guildIt->second;
-	}
-	for (auto& entry : g_commands)
-	{
-		CommandData& existing = entry.second;
-		if (existing.name == name && existing.guildId == guildId)
-		{
-			// The legacy manager updates the callback on duplicate creation and
-			// returns the existing handle instead of registering another command.
-			existing.callback = callback;
-			existing.callbackScript = callbackScript;
-			logCommandInfo("[DiscordBridge] local Discord command '" + name + "' uses Pawn callback '" + callback + "' (handle " + std::to_string(entry.first) + ")");
-			queueCommandCreation(entry.first, nativeBot());
-			return entry.first;
-		}
-	}
-	const auto creationCancelled = std::make_shared<std::atomic_bool>(false);
-	const CommandData command {
-		{}, guildId, name, description, callback, callbackScript, creationCancelled, params[4] != 0
+	static const AMX_NATIVE_INFO kNatives[] = {
+		{ "DBR_ConnectBot", Native_ConnectDiscordBot },
+		{ "DBR_IsConnected", Native_IsDiscordConnected },
+		{ "DBR_DisconnectBot", Native_DisconnectBot },
+		{ "DBR_SetDebugMode", Native_SetDebugMode },
+		{ "DBR_IsDebugMode", Native_IsDebugMode },
+
+		{ "DBR_FindChannelByID", Native_FindChannelById },
+		{ "DBR_FindChannelByName", Native_FindChannelByName },
+		{ "DBR_FindConfiguredChannel", Native_FindDiscordConfiguredChannel },
+		{ "DBR_GetChannelID", Native_GetChannelId },
+		{ "DBR_GetChannelName", Native_GetChannelName },
+		{ "DBR_GetChannelTopic", Native_GetChannelTopic },
+		{ "DBR_GetChannelType", Native_GetChannelType },
+		{ "DBR_GetChannelGuild", Native_GetChannelGuild },
+		{ "DBR_GetChannelPosition", Native_GetChannelPosition },
+		{ "DBR_IsChannelNsfw", Native_IsChannelNsfw },
+		{ "DBR_GetChannelParentCategory", Native_GetChannelParentCategory },
+		{ "DBR_SendChannelMessage", Native_SendChannelMessage },
+		{ "DBR_SetChannelName", Native_SetChannelName },
+		{ "DBR_SetChannelTopic", Native_SetChannelTopic },
+		{ "DBR_SetChannelPosition", Native_SetChannelPosition },
+		{ "DBR_SetChannelNsfw", Native_SetChannelNsfw },
+		{ "DBR_SetChannelParentCategory", Native_SetChannelParentCategory },
+		{ "DBR_DeleteChannel", Native_DeleteChannel },
+
+		{ "DBR_FindUserByID", Native_FindUserById },
+		{ "DBR_FindUserByName", Native_FindUserByName },
+		{ "DBR_GetUserID", Native_GetUserId },
+		{ "DBR_GetUserName", Native_GetUserName },
+		{ "DBR_IsUserBot", Native_IsUserBot },
+		{ "DBR_IsUserVerified", Native_IsUserVerified },
+
+		{ "DBR_FindGuildByID", Native_FindGuildById },
+		{ "DBR_FindGuildByName", Native_FindGuildByName },
+		{ "DBR_GetGuildID", Native_GetGuildId },
+		{ "DBR_GetGuildName", Native_GetGuildName },
+		{ "DBR_GetGuildOwnerID", Native_GetGuildOwnerId },
+		{ "DBR_GetGuildRole", Native_GetGuildRole },
+		{ "DBR_GetGuildRoleCount", Native_GetGuildRoleCount },
+		{ "DBR_GetGuildMember", Native_GetGuildMember },
+		{ "DBR_GetGuildMemberCount", Native_GetGuildMemberCount },
+		{ "DBR_GetGuildMemberVoiceChannel", Native_GetGuildMemberVoiceChannel },
+		{ "DBR_GetGuildMemberNickname", Native_GetGuildMemberNickname },
+		{ "DBR_GetGuildMemberRole", Native_GetGuildMemberRole },
+		{ "DBR_GetGuildMemberRoleCount", Native_GetGuildMemberRoleCount },
+		{ "DBR_HasGuildMemberRole", Native_HasGuildMemberRole },
+		{ "DBR_GetGuildMemberStatus", Native_GetGuildMemberStatus },
+		{ "DBR_GetGuildChannel", Native_GetGuildChannel },
+		{ "DBR_GetGuildChannelCount", Native_GetGuildChannelCount },
+		{ "DBR_GetAllGuilds", Native_GetAllGuilds },
+		{ "DBR_SetGuildName", Native_SetGuildName },
+		{ "DBR_CreateGuildChannel", Native_CreateGuildChannel },
+
+		{ "DBR_FindRoleByID", Native_FindRoleById },
+		{ "DBR_FindRoleByName", Native_FindRoleByName },
+		{ "DBR_GetRoleID", Native_GetRoleId },
+		{ "DBR_GetRoleName", Native_GetRoleName },
+		{ "DBR_GetRoleColour", Native_GetRoleColor },
+		{ "DBR_GetRolePermissions", Native_GetRolePermissions },
+		{ "DBR_IsRoleHoist", Native_IsRoleHoist },
+		{ "DBR_GetRolePosition", Native_GetRolePosition },
+		{ "DBR_IsRoleMentionable", Native_IsRoleMentionable },
+		{ "DBR_SetGuildRolePosition", Native_SetGuildRolePosition },
+		{ "DBR_SetGuildRoleName", Native_SetGuildRoleName },
+		{ "DBR_SetGuildRolePermissions", Native_SetGuildRolePermissions },
+		{ "DBR_SetGuildRoleColour", Native_SetGuildRoleColor },
+		{ "DBR_SetGuildRoleHoist", Native_SetGuildRoleHoist },
+		{ "DBR_SetGuildRoleMentionable", Native_SetGuildRoleMentionable },
+		{ "DBR_CreateGuildRole", Native_CreateGuildRole },
+		{ "DBR_DeleteGuildRole", Native_DeleteGuildRole },
+
+		{ "DBR_GetMessageID", Native_GetMessageId },
+		{ "DBR_GetMessageChannel", Native_GetMessageChannel },
+		{ "DBR_GetMessageAuthor", Native_GetMessageAuthor },
+		{ "DBR_GetMessageContent", Native_GetMessageContent },
+		{ "DBR_IsMessageTTS", Native_IsMessageTts },
+		{ "DBR_IsMessageMentioningEveryone", Native_IsMessageMentioningEveryone },
+		{ "DBR_GetMessageUserMentionCount", Native_GetMessageUserMentionCount },
+		{ "DBR_GetMessageUserMention", Native_GetMessageUserMention },
+		{ "DBR_GetMessageRoleMentionCount", Native_GetMessageRoleMentionCount },
+		{ "DBR_GetMessageRoleMention", Native_GetMessageRoleMention },
+		{ "DBR_ForgetMessage", Native_DeleteInternalMessage },
+		{ "DBR_SetMessagePersistent", Native_SetMessagePersistent },
+		{ "DBR_DeleteMessage", Native_DeleteMessage },
+		{ "DBR_EditMessage", Native_EditMessage },
+
+		{ "DBR_CreateEmoji", Native_CreateEmoji },
+		{ "DBR_DeleteEmoji", Native_DeleteEmoji },
+		{ "DBR_GetEmojiName", Native_GetEmojiName },
+		{ "DBR_CreateReaction", Native_CreateReaction },
+		{ "DBR_DeleteMessageReaction", Native_DeleteMessageReaction },
+
+		{ "DBR_TriggerBotTypingIndicator", Native_TriggerBotTypingIndicator },
+		{ "DBR_CreatePrivateChannel", Native_CreatePrivateChannel },
+		{ "DBR_EscapeMarkdown", Native_EscapeMarkdown },
+
+		{ "DBR_CreateEmbed", Native_CreateEmbed },
+		{ "DBR_DeleteEmbed", Native_DeleteEmbed },
+		{ "DBR_SendChannelEmbedMessage", Native_SendChannelEmbedMessage },
+		{ "DBR_AddEmbedField", Native_AddEmbedField },
+		{ "DBR_SetEmbedTitle", Native_SetEmbedTitle },
+		{ "DBR_SetEmbedDescription", Native_SetEmbedDescription },
+		{ "DBR_SetEmbedURL", Native_SetEmbedUrl },
+		{ "DBR_SetEmbedTimestamp", Native_SetEmbedTimestamp },
+		{ "DBR_SetEmbedColour", Native_SetEmbedColor },
+		{ "DBR_SetEmbedFooter", Native_SetEmbedFooter },
+		{ "DBR_SetEmbedThumbnail", Native_SetEmbedThumbnail },
+		{ "DBR_SetEmbedImage", Native_SetEmbedImage },
 	};
-	const cell handle = assignCommandHandle(command);
-	const char* callbackStatus = callbackScript ? "callback found" : "callback pending";
-	logCommandInfo("[DiscordBridge] local Discord command '" + name + "' uses Pawn callback '" + callback + "' (handle " + std::to_string(handle) + ", " + callbackStatus + ")");
-	DiscordBot* bot = nativeBot();
-	if (!queueCommandCreation(handle, bot))
-	{
-		if (!bot)
-		{
-			logCommandInfo("[DiscordBridge] local Discord command '" + name + "' is waiting for the bot connection");
-		}
-		else
-		{
-			logCommandWarning("[DiscordBridge] DCC_CreateCommand could not queue command '" + name + "'");
-		}
-	}
-	return handle;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_DeleteCommand(AMX*, cell* params)
-{
-	auto it = g_commands.find(params[1]);
-	if (it == g_commands.end()) return 0;
-	DiscordBot* bot = nativeBot();
-	if (!bot) return 0;
-	if (it->second.creationCancelled) it->second.creationCancelled->store(true, std::memory_order_release);
-	const std::string guildId = it->second.guildId;
-	const std::string discordId = it->second.discordId;
-	const std::string name = it->second.name;
-	bool queued = true;
-	if (!discordId.empty())
-	{
-		queued = bot->submitRestTask([bot, guildId, discordId, name](DiscordHTTP& http)
-		{
-			const auto response = http.deleteApplicationCommand(guildId, discordId);
-			if (!response.success) logCommandResponseFailure(bot, "deletion", name, response);
-		});
-	}
-	else
-	{
-		// The remote id may not have reached the component tick yet.  Look up
-		// the name in the same serialized REST queue so deleting a just-created
-		// command cannot leave an orphan on Discord.
-		queued = bot->submitRestTask([bot, guildId, name](DiscordHTTP& http)
-		{
-			const auto list = http.getApplicationCommands(guildId);
-			if (!list.success)
-			{
-				logCommandResponseFailure(bot, "deletion lookup", name, list);
-				return;
-			}
-			const DiscordJson data = DiscordJson::parse(list.body, nullptr, false);
-			if (!data.is_array()) return;
-			for (const auto& item : data)
-			{
-				if (!item.is_object() || item.value("name", std::string()) != name) continue;
-				const std::string id = item.value("id", std::string());
-				if (id.empty()) continue;
-				const auto response = http.deleteApplicationCommand(guildId, id);
-				if (!response.success) logCommandResponseFailure(bot, "deletion", name, response);
-				break;
-			}
-		});
-	}
-	if (!queued) return 0;
-	g_commands.erase(it);
-	return 1;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_GetInteractionMentionCount(AMX* amx, cell* params)
-{
-	auto it = g_interactions.find(params[1]); cell* out = nativeRef(amx, params[2]);
-	if (it == g_interactions.end() || !out) return 0;
-	*out = static_cast<cell>(it->second.mentions.size());
-	return 1;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_GetInteractionMention(AMX* amx, cell* params)
-{
-	auto it = g_interactions.find(params[1]); cell* out = nativeRef(amx, params[3]);
-	if (it == g_interactions.end() || !out || params[2] < 0 || static_cast<size_t>(params[2]) >= it->second.mentions.size()) return 0;
-	*out = it->second.mentions[static_cast<size_t>(params[2])]; return 1;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_GetInteractionContent(AMX* amx, cell* params)
-{
-	auto it = g_interactions.find(params[1]); if (it == g_interactions.end()) return 0;
-	return setAmxString(amx, params[2], it->second.content, params[3]) ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_GetInteractionChannel(AMX* amx, cell* params)
-{
-	auto it = g_interactions.find(params[1]); cell* out = nativeRef(amx, params[2]);
-	if (it == g_interactions.end() || !out) return 0;
-	if (it->second.channelId.empty())
-	{
-		*out = 0;
-		return 1;
-	}
-	const cell channelHandle = assignChannelHandle(it->second.channelId);
-	g_channelHandleToGuildId[channelHandle] = it->second.guildId;
-	*out = channelHandle;
-	return 1;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_GetInteractionGuild(AMX* amx, cell* params)
-{
-	auto it = g_interactions.find(params[1]); cell* out = nativeRef(amx, params[2]);
-	if (it == g_interactions.end() || !out) return 0;
-	*out = it->second.guildId.empty() ? 0 : assignGuildHandle(it->second.guildId);
-	return 1;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_SendInteractionMessage(AMX* amx, cell* params)
-{
-	auto it = g_interactions.find(params[1]);
-	DiscordBot* bot = nativeBot();
-	if (it == g_interactions.end() || !bot) return 0;
-	const std::string content = getAmxString(amx, params[2]); if (content.size() > 2000) return 0;
-	const bool responded = it->second.responded;
-	const std::string interactionId = it->second.id;
-	const std::string token = it->second.token;
-	const std::string payload = responded
-		? messagePayload(content, nullptr)
-		: DiscordJson { { "type", 4 }, { "data", { { "content", content } } } }.dump();
-	const bool queued = bot->submitRestTask([responded, interactionId, token, payload](DiscordHTTP& http)
-	{
-		if (responded) http.editOriginalInteractionResponse(token, payload);
-		else http.createInteractionResponse(interactionId, token, payload);
-	});
-	if (queued) it->second.responded = true;
-	return queued ? 1 : 0;
-}
-
-cell AMX_NATIVE_CALL Native_DCC_SendInteractionEmbed(AMX* amx, cell* params)
-{
-	auto interactionIt = g_interactions.find(params[1]); auto embedIt = g_embeds.find(params[2]);
-	DiscordBot* bot = nativeBot();
-	if (interactionIt == g_interactions.end() || embedIt == g_embeds.end() || !bot) return 0;
-	const std::string content = getAmxString(amx, params[3]); if (content.size() > 2000) return 0;
-	const std::string payload = messagePayload(content, &embedIt->second);
-	const bool responded = interactionIt->second.responded;
-	const std::string interactionId = interactionIt->second.id;
-	const std::string token = interactionIt->second.token;
-	const bool queued = bot->submitRestTask([responded, interactionId, token, payload](DiscordHTTP& http)
-	{
-		if (responded) http.editOriginalInteractionResponse(token, payload);
-		else http.createInteractionResponse(interactionId, token, DiscordJson { { "type", 4 }, { "data", DiscordJson::parse(payload) } }.dump());
-	});
-	if (queued)
-	{
-		g_embeds.erase(embedIt);
-		interactionIt->second.responded = true;
-	}
-	return queued ? 1 : 0;
-}
-
-void handleDiscordInteractionPayloadInternal(const std::string& json)
-{
-	const DiscordJson data = DiscordJson::parse(json, nullptr, false);
-	if (data.is_discarded() || !data.is_object()) return;
-	const int type = data.value("type", 0);
-	if (type != 1 && type != 2 && type != 3 && type != 4 && type != 5) return;
-
-	InteractionData interaction;
-	interaction.id = data.value("id", std::string());
-	interaction.token = data.value("token", std::string());
-	interaction.channelId = data.value("channel_id", std::string());
-	interaction.guildId = data.value("guild_id", std::string());
-	DiscordBot* bot = nativeBot();
-	if (type == 1)
-	{
-		const std::string id = data.value("id", std::string());
-		const std::string token = data.value("token", std::string());
-		if (bot && !id.empty() && !token.empty())
-		{
-			bot->submitRestTask([id, token](DiscordHTTP& http)
-			{
-				http.createInteractionResponse(id, token, DiscordJson { { "type", 1 } }.dump());
-			});
-		}
-		return;
-	}
-	const DiscordJson commandData = data.value("data", DiscordJson::object());
-	if (commandData.is_object())
-	{
-		if ((commandData.find("options") != commandData.end()) && commandData["options"].is_array() && !commandData["options"].empty())
-		{
-			const auto& option = commandData["options"][0];
-			if (option.is_object() && (option.find("value") != option.end()))
-			{
-				if (option["value"].is_string()) interaction.content = option["value"].get<std::string>();
-				else interaction.content = option["value"].dump();
-			}
-		}
-	}
-	if (interaction.id.empty() || interaction.token.empty()) return;
-	const cell interactionHandle = assignInteractionHandle(interaction);
-	InteractionData* storedInteraction = nullptr;
-	if (auto stored = g_interactions.find(interactionHandle); stored != g_interactions.end()) storedInteraction = &stored->second;
-	if (!storedInteraction) return;
-
-	const DiscordJson actor = (data.find("member") != data.end()) && data["member"].is_object() ? data["member"].value("user", DiscordJson::object()) : data.value("user", DiscordJson::object());
-	DiscordUser* user = nullptr;
-	if (actor.is_object() && (actor.find("id") != actor.end()) && actor["id"].is_string())
-	{
-		user = component()->upsertUserFromJson(actor.dump());
-	}
-	const cell userHandle = user ? assignUserHandle(user->getUserId()) : 0;
-
-	const DiscordJson resolved = commandData.is_object() ? commandData.value("resolved", DiscordJson::object()) : DiscordJson::object();
-	if (resolved.is_object() && (resolved.find("users") != resolved.end()) && resolved["users"].is_object())
-	{
-		for (auto item = resolved["users"].begin(); item != resolved["users"].end(); ++item)
-		{
-			if (item.value().is_object())
-			{
-				if (DiscordUser* mention = component()->upsertUserFromJson(item.value().dump())) storedInteraction->mentions.push_back(assignUserHandle(mention->getUserId()));
-			}
-		}
-	}
-	collectInteractionTextMentions(*storedInteraction);
-	if (bot)
-	{
-		// A gateway interaction must be acknowledged promptly.  Application
-		// commands and modal submits use a deferred channel response, message
-		// components use a deferred update, and autocomplete gets an empty
-		// choices response until a richer option API is added.
-		DiscordJson acknowledgement = { { "type", type == 3 ? 6 : type == 4 ? 8 : 5 } };
-		if (type == 4) acknowledgement["data"] = { { "choices", DiscordJson::array() } };
-		const std::string interactionId = storedInteraction->id;
-		const std::string token = storedInteraction->token;
-		storedInteraction->responded = bot->submitRestTask([interactionId, token, acknowledgement = acknowledgement.dump()](DiscordHTTP& http)
-		{
-			http.createInteractionResponse(interactionId, token, acknowledgement);
-		});
-	}
-
-	const std::string commandName = type == 2 && commandData.is_object() ? commandData.value("name", std::string()) : std::string();
-	bool matchedCommand = false;
-	for (const auto& entry : g_commands)
-	{
-		const CommandData& command = entry.second;
-		if (command.name != commandName || (!command.guildId.empty() && command.guildId != storedInteraction->guildId)) continue;
-		matchedCommand = true;
-		if (userHandle != 0 && !callPawnPublicFromScript(command.callback.c_str(), command.callbackScript, interactionHandle, userHandle))
-		{
-			logCommandWarningOnce("missing-callback:" + command.guildId + ":" + command.name + ":" + command.callback,
-				"[DiscordBridge] no loaded Pawn callback '" + command.callback + "' for Discord command '" + command.name + "'");
-		}
-		break;
-	}
-	if (!matchedCommand && !commandName.empty())
-	{
-		logCommandWarningOnce("unknown-command:" + storedInteraction->guildId + ":" + commandName,
-			"[DiscordBridge] received Discord command '" + commandName + "' with no local DCC_CreateCommand registration");
-	}
-	g_interactions.erase(interactionHandle);
-}
-
-NativeFunc findImplemented(const std::string& name)
-{
-	static const std::unordered_map<std::string, NativeFunc> kImplemented {
-		{ "ConnectDiscordBot", Native_ConnectDiscordBot },
-		{ "IsDiscordConnected", Native_IsDiscordConnected },
-		{ "DCC_FindChannelById", Native_DCC_FindChannelById },
-		{ "DCC_FindChannelByName", Native_DCC_FindChannelByName },
-		{ "DCC_GetChannelId", Native_DCC_GetChannelId },
-		{ "DCC_GetChannelName", Native_DCC_GetChannelName },
-		{ "DCC_GetChannelTopic", Native_DCC_GetChannelTopic },
-		{ "DCC_GetChannelType", Native_DCC_GetChannelType },
-		{ "DCC_GetChannelGuild", Native_DCC_GetChannelGuild },
-		{ "DCC_GetChannelPosition", Native_DCC_GetChannelPosition },
-		{ "DCC_IsChannelNsfw", Native_DCC_IsChannelNsfw },
-		{ "DCC_GetChannelParentCategory", Native_DCC_GetChannelParentCategory },
-		{ "DCC_SendChannelMessage", Native_DCC_SendChannelMessage },
-		{ "DCC_SetChannelName", Native_DCC_SetChannelName },
-		{ "DCC_SetChannelTopic", Native_DCC_SetChannelTopic },
-		{ "DCC_SetChannelPosition", Native_DCC_SetChannelPosition },
-		{ "DCC_SetChannelNsfw", Native_DCC_SetChannelNsfw },
-		{ "DCC_SetChannelParentCategory", Native_DCC_SetChannelParentCategory },
-		{ "DCC_DeleteChannel", Native_DCC_DeleteChannel },
-		{ "DCC_FindUserById", Native_DCC_FindUserById },
-		{ "DCC_FindUserByName", Native_DCC_FindUserByName },
-		{ "DCC_GetUserId", Native_DCC_GetUserId },
-		{ "DCC_GetUserName", Native_DCC_GetUserName },
-		{ "DCC_GetUserDiscriminator", Native_DCC_GetUserDiscriminator },
-		{ "DCC_IsUserBot", Native_DCC_IsUserBot },
-		{ "DCC_IsUserVerified", Native_DCC_IsUserVerified },
-		{ "DCC_FindGuildById", Native_DCC_FindGuildById },
-		{ "DCC_FindGuildByName", Native_DCC_FindGuildByName },
-		{ "DCC_FindRoleById", Native_DCC_FindRoleById },
-		{ "DCC_FindRoleByName", Native_DCC_FindRoleByName },
-		{ "DCC_GetGuildId", Native_DCC_GetGuildId },
-		{ "DCC_GetGuildName", Native_DCC_GetGuildName },
-		{ "DCC_GetGuildOwnerId", Native_DCC_GetGuildOwnerId },
-		{ "DCC_GetGuildRole", Native_DCC_GetGuildRole },
-		{ "DCC_GetGuildRoleCount", Native_DCC_GetGuildRoleCount },
-		{ "DCC_GetGuildMember", Native_DCC_GetGuildMember },
-		{ "DCC_GetGuildMemberCount", Native_DCC_GetGuildMemberCount },
-		{ "DCC_GetGuildMemberVoiceChannel", Native_DCC_GetGuildMemberVoiceChannel },
-		{ "DCC_GetGuildMemberNickname", Native_DCC_GetGuildMemberNickname },
-		{ "DCC_GetGuildMemberRole", Native_DCC_GetGuildMemberRole },
-		{ "DCC_GetGuildMemberRoleCount", Native_DCC_GetGuildMemberRoleCount },
-		{ "DCC_HasGuildMemberRole", Native_DCC_HasGuildMemberRole },
-		{ "DCC_GetGuildMemberStatus", Native_DCC_GetGuildMemberStatus },
-		{ "DCC_GetGuildChannel", Native_DCC_GetGuildChannel },
-		{ "DCC_GetGuildChannelCount", Native_DCC_GetGuildChannelCount },
-		{ "DCC_GetAllGuilds", Native_DCC_GetAllGuilds },
-		{ "DCC_SetGuildName", Native_DCC_SetGuildName },
-		{ "DCC_CreateGuildChannel", Native_DCC_CreateGuildChannel },
-		{ "DCC_GetCreatedGuildChannel", Native_DCC_GetCreatedGuildChannel },
-		{ "DCC_CacheChannelMessage", Native_DCC_CacheChannelMessage },
-		{ "DCC_GetMessageId", Native_DCC_GetMessageId },
-		{ "DCC_GetMessageChannel", Native_DCC_GetMessageChannel },
-		{ "DCC_GetMessageAuthor", Native_DCC_GetMessageAuthor },
-		{ "DCC_GetMessageContent", Native_DCC_GetMessageContent },
-		{ "DCC_IsMessageTts", Native_DCC_IsMessageTts },
-		{ "DCC_IsMessageMentioningEveryone", Native_DCC_IsMessageMentioningEveryone },
-		{ "DCC_GetMessageUserMentionCount", Native_DCC_GetMessageUserMentionCount },
-		{ "DCC_GetMessageUserMention", Native_DCC_GetMessageUserMention },
-		{ "DCC_GetMessageRoleMentionCount", Native_DCC_GetMessageRoleMentionCount },
-		{ "DCC_GetMessageRoleMention", Native_DCC_GetMessageRoleMention },
-		{ "DCC_GetCreatedMessage", Native_DCC_GetCreatedMessage },
-		{ "DCC_DeleteInternalMessage", Native_DCC_DeleteInternalMessage },
-		{ "DCC_SetMessagePersistent", Native_DCC_SetMessagePersistent },
-		{ "DCC_DeleteMessage", Native_DCC_DeleteMessage },
-		{ "DCC_EditMessage", Native_DCC_EditMessage },
-		{ "DCC_GetRoleId", Native_DCC_GetRoleId },
-		{ "DCC_GetRoleName", Native_DCC_GetRoleName },
-		{ "DCC_GetRoleColor", Native_DCC_GetRoleColor },
-		{ "DCC_GetRolePermissions", Native_DCC_GetRolePermissions },
-		{ "DCC_IsRoleHoist", Native_DCC_IsRoleHoist },
-		{ "DCC_GetRolePosition", Native_DCC_GetRolePosition },
-		{ "DCC_IsRoleMentionable", Native_DCC_IsRoleMentionable },
-		{ "DCC_SetGuildRolePosition", Native_DCC_SetGuildRolePosition },
-		{ "DCC_SetGuildRoleName", Native_DCC_SetGuildRoleName },
-		{ "DCC_SetGuildRolePermissions", Native_DCC_SetGuildRolePermissions },
-		{ "DCC_SetGuildRoleColor", Native_DCC_SetGuildRoleColor },
-		{ "DCC_SetGuildRoleHoist", Native_DCC_SetGuildRoleHoist },
-		{ "DCC_SetGuildRoleMentionable", Native_DCC_SetGuildRoleMentionable },
-		{ "DCC_CreateGuildRole", Native_DCC_CreateGuildRole },
-		{ "DCC_GetCreatedGuildRole", Native_DCC_GetCreatedGuildRole },
-		{ "DCC_DeleteGuildRole", Native_DCC_DeleteGuildRole },
-		{ "DCC_CreateEmoji", Native_DCC_CreateEmoji },
-		{ "DCC_DeleteEmoji", Native_DCC_DeleteEmoji },
-		{ "DCC_GetEmojiName", Native_DCC_GetEmojiName },
-		{ "DCC_CreateReaction", Native_DCC_CreateReaction },
-		{ "DCC_DeleteMessageReaction", Native_DCC_DeleteMessageReaction },
-		{ "DCC_AddGuildMemberRole", Native_DCC_AddGuildMemberRole },
-		{ "DCC_RemoveGuildMemberRole", Native_DCC_RemoveGuildMemberRole },
-		{ "DCC_SetGuildMemberNickname", Native_DCC_SetGuildMemberNickname },
-		{ "DCC_SetGuildMemberVoiceChannel", Native_DCC_SetGuildMemberVoiceChannel },
-		{ "DCC_RemoveGuildMember", Native_DCC_RemoveGuildMember },
-		{ "DCC_CreateGuildMemberBan", Native_DCC_CreateGuildMemberBan },
-		{ "DCC_RemoveGuildMemberBan", Native_DCC_RemoveGuildMemberBan },
-		{ "DCC_GetBotPresenceStatus", Native_DCC_GetBotPresenceStatus },
-		{ "DCC_TriggerBotTypingIndicator", Native_DCC_TriggerBotTypingIndicator },
-		{ "DCC_SetBotNickname", Native_DCC_SetBotNickname },
-		{ "DCC_CreatePrivateChannel", Native_DCC_CreatePrivateChannel },
-		{ "DCC_GetCreatedPrivateChannel", Native_DCC_GetCreatedPrivateChannel },
-		{ "DCC_SetBotPresenceStatus", Native_DCC_SetBotPresenceStatus },
-		{ "DCC_SetBotActivity", Native_DCC_SetBotActivity },
-		{ "DCC_EscapeMarkdown", Native_DCC_EscapeMarkdown },
-		{ "DCC_CreateEmbed", Native_DCC_CreateEmbed },
-		{ "DCC_DeleteEmbed", Native_DCC_DeleteEmbed },
-		{ "DCC_SendChannelEmbedMessage", Native_DCC_SendChannelEmbedMessage },
-		{ "DCC_AddEmbedField", Native_DCC_AddEmbedField },
-		{ "DCC_SetEmbedTitle", Native_DCC_SetEmbedTitle },
-		{ "DCC_SetEmbedDescription", Native_DCC_SetEmbedDescription },
-		{ "DCC_SetEmbedUrl", Native_DCC_SetEmbedUrl },
-		{ "DCC_SetEmbedTimestamp", Native_DCC_SetEmbedTimestamp },
-		{ "DCC_SetEmbedColor", Native_DCC_SetEmbedColor },
-		{ "DCC_SetEmbedFooter", Native_DCC_SetEmbedFooter },
-		{ "DCC_SetEmbedThumbnail", Native_DCC_SetEmbedThumbnail },
-		{ "DCC_SetEmbedImage", Native_DCC_SetEmbedImage },
-		{ "DCC_CreateCommand", Native_DCC_CreateCommand },
-		{ "DCC_DeleteCommand", Native_DCC_DeleteCommand },
-		{ "DCC_GetInteractionMentionCount", Native_DCC_GetInteractionMentionCount },
-		{ "DCC_GetInteractionMention", Native_DCC_GetInteractionMention },
-		{ "DCC_GetInteractionContent", Native_DCC_GetInteractionContent },
-		{ "DCC_GetInteractionChannel", Native_DCC_GetInteractionChannel },
-		{ "DCC_GetInteractionGuild", Native_DCC_GetInteractionGuild },
-		{ "DCC_SendInteractionEmbed", Native_DCC_SendInteractionEmbed },
-		{ "DCC_SendInteractionMessage", Native_DCC_SendInteractionMessage },
-
-		{ "FindDiscordChannelByID", Native_DCC_FindChannelById },
-		{ "FindDiscordChannelByName", Native_DCC_FindChannelByName },
-		{ "FindDiscordConfiguredChannel", Native_FindDiscordConfiguredChannel },
-		{ "GetDiscordChannelID", Native_DCC_GetChannelId },
-		{ "GetDiscordChannelName", Native_DCC_GetChannelName },
-		{ "GetDiscordChannelTopic", Native_DCC_GetChannelTopic },
-		{ "GetDiscordChannelType", Native_DCC_GetChannelType },
-		{ "SendDiscordChannelMessage", Native_DCC_SendChannelMessage },
-		{ "SetDiscordChannelName", Native_DCC_SetChannelName },
-		{ "SetDiscordChannelTopic", Native_DCC_SetChannelTopic },
-		{ "DeleteDiscordChannel", Native_DCC_DeleteChannel },
-		{ "FindDiscordUserByID", Native_DCC_FindUserById },
-		{ "FindDiscordUserByName", Native_DCC_FindUserByName },
-		{ "GetDiscordUserID", Native_DCC_GetUserId },
-		{ "GetDiscordUserName", Native_DCC_GetUserName },
-		{ "GetDiscordUserDiscriminator", Native_DCC_GetUserDiscriminator },
-		{ "IsDiscordUserBot", Native_DCC_IsUserBot },
-		{ "FindDiscordGuildByID", Native_DCC_FindGuildById },
-		{ "FindDiscordGuildByName", Native_DCC_FindGuildByName },
-		{ "FindDiscordRoleByID", Native_DCC_FindRoleById },
-		{ "FindDiscordRoleByName", Native_DCC_FindRoleByName },
-		{ "GetDiscordGuildID", Native_DCC_GetGuildId },
-		{ "GetDiscordGuildName", Native_DCC_GetGuildName },
-		{ "GetDiscordGuildOwnerID", Native_DCC_GetGuildOwnerId },
-		{ "CacheDiscordChannelMessage", Native_DCC_CacheChannelMessage },
-		{ "GetDiscordMessageID", Native_DCC_GetMessageId },
-		{ "GetDiscordMessageChannel", Native_DCC_GetMessageChannel },
-		{ "GetDiscordMessageAuthor", Native_DCC_GetMessageAuthor },
-		{ "GetDiscordMessageContent", Native_DCC_GetMessageContent },
-		{ "IsDiscordMessageTTS", Native_DCC_IsMessageTts },
-		{ "IsDiscordMessageMentioningEveryone", Native_DCC_IsMessageMentioningEveryone },
-		{ "DeleteDiscordMessage", Native_DCC_DeleteMessage },
-		{ "EditDiscordMessage", Native_DCC_EditMessage },
-		{ "GetDiscordRoleID", Native_DCC_GetRoleId },
-		{ "GetDiscordRoleName", Native_DCC_GetRoleName },
-		{ "GetDiscordRoleColour", Native_DCC_GetRoleColor },
-		{ "GetDiscordRolePermissions", Native_DCC_GetRolePermissions },
-		{ "IsDiscordRoleHoist", Native_DCC_IsRoleHoist },
-		{ "GetDiscordRolePosition", Native_DCC_GetRolePosition },
-		{ "IsDiscordRoleMentionable", Native_DCC_IsRoleMentionable },
-		{ "CreateDiscordEmoji", Native_DCC_CreateEmoji },
-		{ "DeleteDiscordEmoji", Native_DCC_DeleteEmoji },
-		{ "GetDiscordEmojiName", Native_DCC_GetEmojiName },
-		{ "CreateDiscordReaction", Native_DCC_CreateReaction },
-		{ "DeleteDiscordMessageReaction", Native_DCC_DeleteMessageReaction },
-		{ "AddDiscordGuildMemberRole", Native_DCC_AddGuildMemberRole },
-		{ "RemoveDiscordGuildMemberRole", Native_DCC_RemoveGuildMemberRole },
-		{ "SetDiscordGuildMemberNickname", Native_DCC_SetGuildMemberNickname },
-		{ "SetDiscordGuildMemberVoiceChannel", Native_DCC_SetGuildMemberVoiceChannel },
-		{ "RemoveDiscordGuildMember", Native_DCC_RemoveGuildMember },
-		{ "CreateDiscordGuildMemberBan", Native_DCC_CreateGuildMemberBan },
-		{ "RemoveDiscordGuildMemberBan", Native_DCC_RemoveGuildMemberBan },
-		{ "GetDiscordChannelGuild", Native_DCC_GetChannelGuild },
-		{ "GetDiscordChannelPosition", Native_DCC_GetChannelPosition },
-		{ "IsDiscordChannelNsfw", Native_DCC_IsChannelNsfw },
-		{ "GetDiscordChannelParentCategory", Native_DCC_GetChannelParentCategory },
-		{ "SetDiscordChannelPosition", Native_DCC_SetChannelPosition },
-		{ "SetDiscordChannelNsfw", Native_DCC_SetChannelNsfw },
-		{ "SetDiscordChannelParentCategory", Native_DCC_SetChannelParentCategory },
-		{ "GetDiscordMessageUserMentionCount", Native_DCC_GetMessageUserMentionCount },
-		{ "GetDiscordMessageUserMention", Native_DCC_GetMessageUserMention },
-		{ "GetDiscordMessageRoleMentionCount", Native_DCC_GetMessageRoleMentionCount },
-		{ "GetDiscordMessageRoleMention", Native_DCC_GetMessageRoleMention },
-		{ "GetDiscordCreatedMessage", Native_DCC_GetCreatedMessage },
-		{ "DeleteDiscordInternalMessage", Native_DCC_DeleteInternalMessage },
-		{ "SetDiscordMessagePersistent", Native_DCC_SetMessagePersistent },
-		{ "IsDiscordUserVerified", Native_DCC_IsUserVerified },
-		{ "GetDiscordGuildRole", Native_DCC_GetGuildRole },
-		{ "GetDiscordGuildRoleCount", Native_DCC_GetGuildRoleCount },
-		{ "GetDiscordGuildMember", Native_DCC_GetGuildMember },
-		{ "GetDiscordGuildMemberCount", Native_DCC_GetGuildMemberCount },
-		{ "GetDiscordGuildMemberVoiceChannel", Native_DCC_GetGuildMemberVoiceChannel },
-		{ "GetDiscordGuildMemberNickname", Native_DCC_GetGuildMemberNickname },
-		{ "GetDiscordGuildMemberRole", Native_DCC_GetGuildMemberRole },
-		{ "GetDiscordGuildMemberRoleCount", Native_DCC_GetGuildMemberRoleCount },
-		{ "HasDiscordGuildMemberRole", Native_DCC_HasGuildMemberRole },
-		{ "GetDiscordGuildMemberStatus", Native_DCC_GetGuildMemberStatus },
-		{ "GetDiscordGuildChannel", Native_DCC_GetGuildChannel },
-		{ "GetDiscordGuildChannelCount", Native_DCC_GetGuildChannelCount },
-		{ "GetDiscordAllGuilds", Native_DCC_GetAllGuilds },
-		{ "SetDiscordGuildName", Native_DCC_SetGuildName },
-		{ "CreateDiscordGuildChannel", Native_DCC_CreateGuildChannel },
-		{ "GetDiscordCreatedGuildChannel", Native_DCC_GetCreatedGuildChannel },
-		{ "SetDiscordGuildRolePosition", Native_DCC_SetGuildRolePosition },
-		{ "SetDiscordGuildRoleName", Native_DCC_SetGuildRoleName },
-		{ "SetDiscordGuildRolePermissions", Native_DCC_SetGuildRolePermissions },
-		{ "SetDiscordGuildRoleColour", Native_DCC_SetGuildRoleColor },
-		{ "SetDiscordGuildRoleHoist", Native_DCC_SetGuildRoleHoist },
-		{ "SetDiscordGuildRoleMentionable", Native_DCC_SetGuildRoleMentionable },
-		{ "CreateDiscordGuildRole", Native_DCC_CreateGuildRole },
-		{ "GetDiscordCreatedGuildRole", Native_DCC_GetCreatedGuildRole },
-		{ "DeleteDiscordGuildRole", Native_DCC_DeleteGuildRole },
-		{ "GetDiscordBotPresenceStatus", Native_DCC_GetBotPresenceStatus },
-		{ "TriggerDiscordBotTypingIndicator", Native_DCC_TriggerBotTypingIndicator },
-		{ "SetDiscordBotNickname", Native_DCC_SetBotNickname },
-		{ "CreateDiscordPrivateChannel", Native_DCC_CreatePrivateChannel },
-		{ "GetDiscordCreatedPrivateChannel", Native_DCC_GetCreatedPrivateChannel },
-		{ "SetDiscordBotPresenceStatus", Native_DCC_SetBotPresenceStatus },
-		{ "SetDiscordBotActivity", Native_DCC_SetBotActivity },
-		{ "EscapeDiscordMarkdown", Native_DCC_EscapeMarkdown },
-		{ "CreateDiscordEmbed", Native_DCC_CreateEmbed },
-		{ "DeleteDiscordEmbed", Native_DCC_DeleteEmbed },
-		{ "SendDiscordChannelEmbedMessage", Native_DCC_SendChannelEmbedMessage },
-		{ "AddDiscordEmbedField", Native_DCC_AddEmbedField },
-		{ "SetDiscordEmbedTitle", Native_DCC_SetEmbedTitle },
-		{ "SetDiscordEmbedDescription", Native_DCC_SetEmbedDescription },
-		{ "SetDiscordEmbedURL", Native_DCC_SetEmbedUrl },
-		{ "SetDiscordEmbedTimestamp", Native_DCC_SetEmbedTimestamp },
-		{ "SetDiscordEmbedColour", Native_DCC_SetEmbedColor },
-		{ "SetDiscordEmbedFooter", Native_DCC_SetEmbedFooter },
-		{ "SetDiscordEmbedThumbnail", Native_DCC_SetEmbedThumbnail },
-		{ "SetDiscordEmbedImage", Native_DCC_SetEmbedImage },
-		{ "CreateDiscordCommand", Native_DCC_CreateCommand },
-		{ "DeleteDiscordCommand", Native_DCC_DeleteCommand },
-		{ "GetDiscordInteractionMentionCount", Native_DCC_GetInteractionMentionCount },
-		{ "GetDiscordInteractionMention", Native_DCC_GetInteractionMention },
-		{ "GetDiscordInteractionContent", Native_DCC_GetInteractionContent },
-		{ "GetDiscordInteractionChannel", Native_DCC_GetInteractionChannel },
-		{ "GetDiscordInteractionGuild", Native_DCC_GetInteractionGuild },
-		{ "SendDiscordInteractionEmbed", Native_DCC_SendInteractionEmbed },
-		{ "SendDiscordInteractionMessage", Native_DCC_SendInteractionMessage },
-	};
-
-	auto it = kImplemented.find(name);
-	return it == kImplemented.end() ? Native_InvalidRegistration : it->second;
-}
-
-std::vector<AMX_NATIVE_INFO> buildNativeList()
-{
-	std::vector<AMX_NATIVE_INFO> nativeList;
-	nativeList.reserve(240);
-
-	auto addNative = [&](const char* name)
-	{
-		nativeList.push_back(AMX_NATIVE_INFO { name, findImplemented(name) });
-	};
-
-	addNative("DCC_AddEmbedField");
-	addNative("DCC_AddGuildMemberRole");
-	addNative("DCC_CacheChannelMessage");
-	addNative("DCC_CreateCommand");
-	addNative("DCC_CreateEmbed");
-	addNative("DCC_CreateEmoji");
-	addNative("DCC_CreateGuildChannel");
-	addNative("DCC_CreateGuildMemberBan");
-	addNative("DCC_CreateGuildRole");
-	addNative("DCC_CreatePrivateChannel");
-	addNative("DCC_CreateReaction");
-	addNative("DCC_DeleteChannel");
-	addNative("DCC_DeleteCommand");
-	addNative("DCC_DeleteEmbed");
-	addNative("DCC_DeleteEmoji");
-	addNative("DCC_DeleteGuildRole");
-	addNative("DCC_DeleteInternalMessage");
-	addNative("DCC_DeleteMessage");
-	addNative("DCC_DeleteMessageReaction");
-	addNative("DCC_EditMessage");
-	addNative("DCC_EscapeMarkdown");
-	addNative("DCC_FindChannelById");
-	addNative("DCC_FindChannelByName");
-	addNative("DCC_FindGuildById");
-	addNative("DCC_FindGuildByName");
-	addNative("DCC_FindRoleById");
-	addNative("DCC_FindRoleByName");
-	addNative("DCC_FindUserById");
-	addNative("DCC_FindUserByName");
-	addNative("DCC_GetAllGuilds");
-	addNative("DCC_GetBotPresenceStatus");
-	addNative("DCC_GetChannelGuild");
-	addNative("DCC_GetChannelId");
-	addNative("DCC_GetChannelName");
-	addNative("DCC_GetChannelParentCategory");
-	addNative("DCC_GetChannelPosition");
-	addNative("DCC_GetChannelTopic");
-	addNative("DCC_GetChannelType");
-	addNative("DCC_GetCreatedGuildChannel");
-	addNative("DCC_GetCreatedGuildRole");
-	addNative("DCC_GetCreatedMessage");
-	addNative("DCC_GetCreatedPrivateChannel");
-	addNative("DCC_GetEmojiName");
-	addNative("DCC_GetGuildChannel");
-	addNative("DCC_GetGuildChannelCount");
-	addNative("DCC_GetGuildId");
-	addNative("DCC_GetGuildMember");
-	addNative("DCC_GetGuildMemberCount");
-	addNative("DCC_GetGuildMemberNickname");
-	addNative("DCC_GetGuildMemberRole");
-	addNative("DCC_GetGuildMemberRoleCount");
-	addNative("DCC_GetGuildMemberStatus");
-	addNative("DCC_GetGuildMemberVoiceChannel");
-	addNative("DCC_GetGuildName");
-	addNative("DCC_GetGuildOwnerId");
-	addNative("DCC_GetGuildRole");
-	addNative("DCC_GetGuildRoleCount");
-	addNative("DCC_GetInteractionChannel");
-	addNative("DCC_GetInteractionContent");
-	addNative("DCC_GetInteractionGuild");
-	addNative("DCC_GetInteractionMention");
-	addNative("DCC_GetInteractionMentionCount");
-	addNative("DCC_GetMessageAuthor");
-	addNative("DCC_GetMessageChannel");
-	addNative("DCC_GetMessageContent");
-	addNative("DCC_GetMessageId");
-	addNative("DCC_GetMessageRoleMention");
-	addNative("DCC_GetMessageRoleMentionCount");
-	addNative("DCC_GetMessageUserMention");
-	addNative("DCC_GetMessageUserMentionCount");
-	addNative("DCC_GetRoleColor");
-	addNative("DCC_GetRoleId");
-	addNative("DCC_GetRoleName");
-	addNative("DCC_GetRolePermissions");
-	addNative("DCC_GetRolePosition");
-	addNative("DCC_GetUserDiscriminator");
-	addNative("DCC_GetUserId");
-	addNative("DCC_GetUserName");
-	addNative("DCC_HasGuildMemberRole");
-	addNative("DCC_IsChannelNsfw");
-	addNative("DCC_IsMessageMentioningEveryone");
-	addNative("DCC_IsMessageTts");
-	addNative("DCC_IsRoleHoist");
-	addNative("DCC_IsRoleMentionable");
-	addNative("DCC_IsUserBot");
-	addNative("DCC_IsUserVerified");
-	addNative("DCC_RemoveGuildMember");
-	addNative("DCC_RemoveGuildMemberBan");
-	addNative("DCC_RemoveGuildMemberRole");
-	addNative("DCC_SendChannelEmbedMessage");
-	addNative("DCC_SendChannelMessage");
-	addNative("DCC_SendInteractionEmbed");
-	addNative("DCC_SendInteractionMessage");
-	addNative("DCC_SetBotActivity");
-	addNative("DCC_SetBotNickname");
-	addNative("DCC_SetBotPresenceStatus");
-	addNative("DCC_SetChannelName");
-	addNative("DCC_SetChannelNsfw");
-	addNative("DCC_SetChannelParentCategory");
-	addNative("DCC_SetChannelPosition");
-	addNative("DCC_SetChannelTopic");
-	addNative("DCC_SetEmbedColor");
-	addNative("DCC_SetEmbedDescription");
-	addNative("DCC_SetEmbedFooter");
-	addNative("DCC_SetEmbedImage");
-	addNative("DCC_SetEmbedThumbnail");
-	addNative("DCC_SetEmbedTimestamp");
-	addNative("DCC_SetEmbedTitle");
-	addNative("DCC_SetEmbedUrl");
-	addNative("DCC_SetGuildMemberNickname");
-	addNative("DCC_SetGuildMemberVoiceChannel");
-	addNative("DCC_SetGuildName");
-	addNative("DCC_SetGuildRoleColor");
-	addNative("DCC_SetGuildRoleHoist");
-	addNative("DCC_SetGuildRoleMentionable");
-	addNative("DCC_SetGuildRoleName");
-	addNative("DCC_SetGuildRolePermissions");
-	addNative("DCC_SetGuildRolePosition");
-	addNative("DCC_SetMessagePersistent");
-	addNative("DCC_TriggerBotTypingIndicator");
-
-	addNative("ConnectDiscordBot");
-	addNative("IsDiscordConnected");
-	addNative("FindDiscordChannelByID");
-	addNative("FindDiscordChannelByName");
-	addNative("FindDiscordConfiguredChannel");
-	addNative("GetDiscordChannelID");
-	addNative("GetDiscordChannelName");
-	addNative("GetDiscordChannelTopic");
-	addNative("GetDiscordChannelType");
-	addNative("SendDiscordChannelMessage");
-	addNative("SetDiscordChannelName");
-	addNative("SetDiscordChannelTopic");
-	addNative("DeleteDiscordChannel");
-	addNative("FindDiscordUserByID");
-	addNative("FindDiscordUserByName");
-	addNative("GetDiscordUserID");
-	addNative("GetDiscordUserName");
-	addNative("GetDiscordUserDiscriminator");
-	addNative("IsDiscordUserBot");
-	addNative("FindDiscordGuildByID");
-	addNative("FindDiscordGuildByName");
-	addNative("FindDiscordRoleByID");
-	addNative("FindDiscordRoleByName");
-	addNative("GetDiscordGuildID");
-	addNative("GetDiscordGuildName");
-	addNative("GetDiscordGuildOwnerID");
-	addNative("CacheDiscordChannelMessage");
-	addNative("GetDiscordMessageID");
-	addNative("GetDiscordMessageChannel");
-	addNative("GetDiscordMessageAuthor");
-	addNative("GetDiscordMessageContent");
-	addNative("IsDiscordMessageTTS");
-	addNative("IsDiscordMessageMentioningEveryone");
-	addNative("DeleteDiscordMessage");
-	addNative("EditDiscordMessage");
-	addNative("GetDiscordRoleID");
-	addNative("GetDiscordRoleName");
-	addNative("GetDiscordRoleColour");
-	addNative("GetDiscordRolePermissions");
-	addNative("IsDiscordRoleHoist");
-	addNative("GetDiscordRolePosition");
-	addNative("IsDiscordRoleMentionable");
-	addNative("CreateDiscordEmoji");
-	addNative("DeleteDiscordEmoji");
-	addNative("GetDiscordEmojiName");
-	addNative("CreateDiscordReaction");
-	addNative("DeleteDiscordMessageReaction");
-	addNative("AddDiscordGuildMemberRole");
-	addNative("RemoveDiscordGuildMemberRole");
-	addNative("SetDiscordGuildMemberNickname");
-	addNative("SetDiscordGuildMemberVoiceChannel");
-	addNative("RemoveDiscordGuildMember");
-	addNative("CreateDiscordGuildMemberBan");
-	addNative("RemoveDiscordGuildMemberBan");
-
-	addNative("GetDiscordChannelGuild");
-	addNative("GetDiscordChannelPosition");
-	addNative("IsDiscordChannelNsfw");
-	addNative("GetDiscordChannelParentCategory");
-	addNative("SetDiscordChannelPosition");
-	addNative("SetDiscordChannelNsfw");
-	addNative("SetDiscordChannelParentCategory");
-	addNative("GetDiscordMessageUserMentionCount");
-	addNative("GetDiscordMessageUserMention");
-	addNative("GetDiscordMessageRoleMentionCount");
-	addNative("GetDiscordMessageRoleMention");
-	addNative("GetDiscordCreatedMessage");
-	addNative("DeleteDiscordInternalMessage");
-	addNative("SetDiscordMessagePersistent");
-	addNative("IsDiscordUserVerified");
-	addNative("GetDiscordGuildRole");
-	addNative("GetDiscordGuildRoleCount");
-	addNative("GetDiscordGuildMember");
-	addNative("GetDiscordGuildMemberCount");
-	addNative("GetDiscordGuildMemberVoiceChannel");
-	addNative("GetDiscordGuildMemberNickname");
-	addNative("GetDiscordGuildMemberRole");
-	addNative("GetDiscordGuildMemberRoleCount");
-	addNative("HasDiscordGuildMemberRole");
-	addNative("GetDiscordGuildMemberStatus");
-	addNative("GetDiscordGuildChannel");
-	addNative("GetDiscordGuildChannelCount");
-	addNative("GetDiscordAllGuilds");
-	addNative("SetDiscordGuildName");
-	addNative("CreateDiscordGuildChannel");
-	addNative("GetDiscordCreatedGuildChannel");
-	addNative("SetDiscordGuildRolePosition");
-	addNative("SetDiscordGuildRoleName");
-	addNative("SetDiscordGuildRolePermissions");
-	addNative("SetDiscordGuildRoleColour");
-	addNative("SetDiscordGuildRoleHoist");
-	addNative("SetDiscordGuildRoleMentionable");
-	addNative("CreateDiscordGuildRole");
-	addNative("GetDiscordCreatedGuildRole");
-	addNative("DeleteDiscordGuildRole");
-	addNative("GetDiscordBotPresenceStatus");
-	addNative("TriggerDiscordBotTypingIndicator");
-	addNative("SetDiscordBotNickname");
-	addNative("CreateDiscordPrivateChannel");
-	addNative("GetDiscordCreatedPrivateChannel");
-	addNative("SetDiscordBotPresenceStatus");
-	addNative("SetDiscordBotActivity");
-	addNative("EscapeDiscordMarkdown");
-	addNative("CreateDiscordEmbed");
-	addNative("DeleteDiscordEmbed");
-	addNative("SendDiscordChannelEmbedMessage");
-	addNative("AddDiscordEmbedField");
-	addNative("SetDiscordEmbedTitle");
-	addNative("SetDiscordEmbedDescription");
-	addNative("SetDiscordEmbedURL");
-	addNative("SetDiscordEmbedTimestamp");
-	addNative("SetDiscordEmbedColour");
-	addNative("SetDiscordEmbedFooter");
-	addNative("SetDiscordEmbedThumbnail");
-	addNative("SetDiscordEmbedImage");
-	addNative("CreateDiscordCommand");
-	addNative("DeleteDiscordCommand");
-	addNative("GetDiscordInteractionMentionCount");
-	addNative("GetDiscordInteractionMention");
-	addNative("GetDiscordInteractionContent");
-	addNative("GetDiscordInteractionChannel");
-	addNative("GetDiscordInteractionGuild");
-	addNative("SendDiscordInteractionEmbed");
-	addNative("SendDiscordInteractionMessage");
-
-	return nativeList;
+	natives.insert(natives.end(), std::begin(kNatives), std::end(kNatives));
 }
 }
 
-void HandleDiscordInteractionPayload(const std::string& json)
-{
-	handleDiscordInteractionPayloadInternal(json);
-}
-
-void QueuePendingDiscordCommands(DiscordBot* bot)
-{
-	queuePendingCommandCreations(bot);
-}
+using namespace DiscordNatives;
 
 int RegisterDiscordNatives(IPawnScript& script)
 {
-	static const std::vector<AMX_NATIVE_INFO> kNativeList = buildNativeList();
+	static const std::vector<AMX_NATIVE_INFO> kNativeList = []()
+	{
+		std::vector<AMX_NATIVE_INFO> natives;
+		natives.reserve(360);
+		appendCoreNatives(natives);
+		appendInteractionNatives(natives);
+		appendManagementNatives(natives);
+		return natives;
+	}();
 	return script.Register(kNativeList.data(), static_cast<int>(kNativeList.size()));
 }
 
@@ -3459,10 +2250,22 @@ void ResetDiscordNativeHandles()
 
 void ForgetDiscordNativeScript(IPawnScript& script)
 {
-	for (auto& entry : g_commands)
-	{
-		if (entry.second.callbackScript == &script) entry.second.callbackScript = nullptr;
-	}
+	forgetInteractionScript(script.GetID());
+}
+
+void ServiceDiscordNatives()
+{
+	serviceInteractionState();
+}
+
+void NotifyDiscordNativesReady()
+{
+	onInteractionBotReady();
+}
+
+void NotifyDiscordNativesDisconnected()
+{
+	onInteractionBotDisconnected();
 }
 
 cell GetOrCreateDiscordChannelHandle(StringView channelId)
@@ -3480,9 +2283,11 @@ cell GetOrCreateDiscordUserHandle(StringView userId)
 	return assignUserHandle(userId);
 }
 
-cell GetOrCreateDiscordMessageHandle(StringView messageId)
+cell GetOrCreateDiscordMessageHandle(StringView messageId, StringView channelId)
 {
-	return assignMessageHandle(messageId);
+	const cell handle = assignMessageHandle(messageId);
+	rememberMessageChannel(handle, channelId);
+	return handle;
 }
 
 cell GetOrCreateDiscordRoleHandle(StringView roleId)

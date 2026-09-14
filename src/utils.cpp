@@ -188,4 +188,33 @@ uint64_t parseDiscordTimestamp(const std::string& timestamp)
 #endif
 	return epoch < 0 ? 0 : static_cast<uint64_t>(epoch);
 }
+
+	std::string base64Encode(const std::string& data)
+	{
+		static constexpr char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+		std::string encoded;
+		encoded.reserve(((data.size() + 2) / 3) * 4);
+		size_t index = 0;
+		for (; index + 2 < data.size(); index += 3)
+		{
+			const uint32_t chunk = (static_cast<uint32_t>(static_cast<unsigned char>(data[index])) << 16) |
+				(static_cast<uint32_t>(static_cast<unsigned char>(data[index + 1])) << 8) |
+				static_cast<uint32_t>(static_cast<unsigned char>(data[index + 2]));
+			encoded.push_back(kAlphabet[(chunk >> 18) & 0x3F]);
+			encoded.push_back(kAlphabet[(chunk >> 12) & 0x3F]);
+			encoded.push_back(kAlphabet[(chunk >> 6) & 0x3F]);
+			encoded.push_back(kAlphabet[chunk & 0x3F]);
+		}
+		const size_t remaining = data.size() - index;
+		if (remaining > 0)
+		{
+			uint32_t chunk = static_cast<uint32_t>(static_cast<unsigned char>(data[index])) << 16;
+			if (remaining == 2) chunk |= static_cast<uint32_t>(static_cast<unsigned char>(data[index + 1])) << 8;
+			encoded.push_back(kAlphabet[(chunk >> 18) & 0x3F]);
+			encoded.push_back(kAlphabet[(chunk >> 12) & 0x3F]);
+			encoded.push_back(remaining == 2 ? kAlphabet[(chunk >> 6) & 0x3F] : '=');
+			encoded.push_back('=');
+		}
+		return encoded;
+	}
 }

@@ -38,4 +38,5 @@ void DiscordRole::updateFromJson(const std::string& json)
 	if ((data.find("hoist") != data.end()) && data["hoist"].is_boolean()) hoisted_ = data["hoist"].get<bool>();
 	if ((data.find("position") != data.end()) && data["position"].is_number_integer()) position_ = data["position"].get<int>();
 	if ((data.find("mentionable") != data.end()) && data["mentionable"].is_boolean()) mentionable_ = data["mentionable"].get<bool>();
+	if ((data.find("managed") != data.end()) && data["managed"].is_boolean()) managed_ = data["managed"].get<bool>();
 }

@@ -107,53 +107,58 @@ void DiscordBridgeComponent::onInit(IComponentList* components)
 void DiscordBridgeComponent::onReady()
 {
 	isInitialized_ = true;
+	loadConfiguration();
+	connectConfiguredBot();
+}
 
-	const char* envToken = std::getenv("DCC_BOT_TOKEN");
-	const char* legacyEnvToken = std::getenv("SAMP_DISCORD_BOT_TOKEN");
-	const char* envIntents = std::getenv("DCC_BOT_INTENTS");
-	const char* envChannelId = std::getenv("DCC_CHANNEL_ID");
-	const char* envChannelName = std::getenv("DCC_CHANNEL_NAME");
+void DiscordBridgeComponent::loadConfiguration()
+{
+	// Scripts may call natives before this component's onReady (the gamemode
+	// can load first), so the configuration is also read on first use.
+	if (configurationLoaded_ || !core_) return;
+	configurationLoaded_ = true;
 
-	std::string token;
-	int intents = DCC_DEFAULT_INTENTS;
+	const char* envToken = std::getenv("DISCORD_BOT_TOKEN");
+	const char* envIntents = std::getenv("DISCORD_BOT_INTENTS");
+	const char* envChannelId = std::getenv("DISCORD_CHANNEL_ID");
+	const char* envChannelName = std::getenv("DISCORD_CHANNEL_NAME");
+
+	configuredToken_.clear();
+	configuredIntents_ = DISCORD_DEFAULT_INTENTS;
 	configuredChannelId_.clear();
 	configuredChannelName_.clear();
 
 	if (envToken && *envToken)
 	{
-		token = envToken;
-	}
-	else if (legacyEnvToken && *legacyEnvToken)
-	{
-		token = legacyEnvToken;
+		configuredToken_ = envToken;
 	}
 	else if (core_)
 	{
 		const StringView cfgToken = core_->getConfig().getString("discord_bot_token");
 		if (!cfgToken.empty())
 		{
-			token.assign(cfgToken.data(), cfgToken.length());
+			configuredToken_.assign(cfgToken.data(), cfgToken.length());
 		}
 		else
 		{
-			const StringView legacyToken = core_->getConfig().getString("discord.bot_token");
-			if (!legacyToken.empty()) token.assign(legacyToken.data(), legacyToken.length());
+			const StringView dottedToken = core_->getConfig().getString("discord.bot_token");
+			if (!dottedToken.empty()) configuredToken_.assign(dottedToken.data(), dottedToken.length());
 		}
 	}
 
 	if (envIntents && *envIntents)
 	{
-		intents = std::atoi(envIntents);
+		configuredIntents_ = std::atoi(envIntents);
 	}
 	else if (core_)
 	{
 		if (int* cfgIntents = core_->getConfig().getInt("discord_bot_intents"))
 		{
-			intents = *cfgIntents;
+			configuredIntents_ = *cfgIntents;
 		}
-		else if (int* legacyIntents = core_->getConfig().getInt("discord.intents"))
+		else if (int* dottedIntents = core_->getConfig().getInt("discord.intents"))
 		{
-			intents = *legacyIntents;
+			configuredIntents_ = *dottedIntents;
 		}
 	}
 
@@ -199,10 +204,60 @@ void DiscordBridgeComponent::onReady()
 		}
 	}
 
-	if (!token.empty())
+}
+
+bool DiscordBridgeComponent::requestDisconnect()
+{
+	if (!bot_ || disconnectRequested_) return false;
+	disconnectRequested_ = true;
+	reconnectRequested_ = false;
+	// Outside the bot's own dispatch (OnGameModeExit, commands, timers...) the
+	// bot shuts down immediately, even when no further server tick will run.
+	if (!insideBotUpdate_) performPendingDisconnect();
+	return true;
+}
+
+void DiscordBridgeComponent::queueReconnect(StringView token, int intents)
+{
+	reconnectRequested_ = true;
+	reconnectToken_.assign(token.data(), token.length());
+	reconnectIntents_ = intents;
+}
+
+void DiscordBridgeComponent::performPendingDisconnect()
+{
+	if (!disconnectRequested_) return;
+	disconnectRequested_ = false;
+
+	const bool wasConnected = bot_ && bot_->isConnected();
+	if (bot_)
 	{
-		connectBot(token, intents);
+		bot_->disconnect();
+		bot_.reset();
 	}
+	// Cached entities belong to the old session; handles, commands and
+	// builders created by scripts stay valid.
+	channels_.clear();
+	guilds_.clear();
+	users_.clear();
+	messages_.clear();
+	roles_.clear();
+	NotifyDiscordNativesDisconnected();
+	if (wasConnected) onBotDisconnectedEvent();
+
+	if (reconnectRequested_)
+	{
+		reconnectRequested_ = false;
+		if (hasConfiguredToken()) connectConfiguredBot();
+		else if (!reconnectToken_.empty()) connectBot(reconnectToken_, reconnectIntents_);
+		reconnectToken_.clear();
+	}
+}
+
+bool DiscordBridgeComponent::connectConfiguredBot()
+{
+	if (configuredToken_.empty()) return false;
+	return connectBot(configuredToken_, configuredIntents_);
 }
 
 void DiscordBridgeComponent::provideConfiguration(ILogger& logger, IEarlyConfig& config, bool defaults)
@@ -214,7 +269,7 @@ void DiscordBridgeComponent::provideConfiguration(ILogger& logger, IEarlyConfig&
 	}
 	if (defaults || config.getType("discord_bot_intents") == ConfigOptionType_None)
 	{
-		config.setInt("discord_bot_intents", DCC_DEFAULT_INTENTS);
+		config.setInt("discord_bot_intents", DISCORD_DEFAULT_INTENTS);
 	}
 	if (defaults || config.getType("discord.channel_name") == ConfigOptionType_None)
 	{
@@ -224,8 +279,8 @@ void DiscordBridgeComponent::provideConfiguration(ILogger& logger, IEarlyConfig&
 	{
 		config.setString("discord.channel_id", "");
 	}
-	// Preserve the keys used by the original connector while keeping one
-	// canonical open.mp configuration name.
+	// Accept the dotted spelling produced by nested config.json sections as an
+	// alias of each flat key.
 	config.addAlias("discord.bot_token", "discord_bot_token", true);
 	config.addAlias("discord.intents", "discord_bot_intents", true);
 	config.addAlias("discord_channel_name", "discord.channel_name", true);
@@ -248,11 +303,10 @@ bool DiscordBridgeComponent::start(StringView token, int intents, StringView cha
 	isInitialized_ = true;
 	configuredChannelId_.assign(channelId.data(), channelId.length());
 	configuredChannelName_.assign(channelName.data(), channelName.length());
-	if (!token.empty())
-	{
-		return connectBot(token, intents);
-	}
-	return false;
+	configuredToken_.assign(token.data(), token.length());
+	configuredIntents_ = intents;
+	configurationLoaded_ = true;
+	return connectConfiguredBot();
 }
 
 void DiscordBridgeComponent::free()
@@ -278,6 +332,9 @@ void DiscordBridgeComponent::free()
 
 void DiscordBridgeComponent::reset()
 {
+	disconnectRequested_ = false;
+	reconnectRequested_ = false;
+	reconnectToken_.clear();
 	ResetDiscordNativeHandles();
 
 	channels_.clear();
@@ -318,9 +375,7 @@ bool DiscordBridgeComponent::connectBot(StringView token, int intents)
 	}
 
 	bot_ = std::make_unique<DiscordBot>(this, core_, token, intents);
-	const bool connected = bot_->connect();
-	if (connected) QueuePendingDiscordCommands(bot_.get());
-	return connected;
+	return bot_->connect();
 }
 
 IDiscordChannel* DiscordBridgeComponent::findConfiguredChannel()
@@ -464,10 +519,14 @@ void DiscordBridgeComponent::onAmxUnload(AMX* amx)
 
 void DiscordBridgeComponent::onTick(Microseconds, TimePoint)
 {
+	ServiceDiscordNatives();
 	if (bot_)
 	{
+		insideBotUpdate_ = true;
 		bot_->update();
+		insideBotUpdate_ = false;
 	}
+	performPendingDisconnect();
 }
 
 DiscordBridgeComponent* DiscordBridgeComponent::getInstance()
@@ -769,111 +828,96 @@ void DiscordBridgeComponent::onChannelCreateEvent(DiscordChannel& channel)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onChannelCreate, channel);
 	const cell channelHandle = GetOrCreateDiscordChannelHandle(channel.getChannelId());
-	CallPawnPublic(pawn_, "OnDiscordChannelCreate", channelHandle);
-	CallPawnPublic(pawn_, "DCC_OnChannelCreate", channelHandle);
+	CallPawnPublic(pawn_, "DBR_OnChannelCreate", channelHandle);
 }
 
 void DiscordBridgeComponent::onChannelUpdateEvent(DiscordChannel& channel)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onChannelUpdate, channel);
 	const cell channelHandle = GetOrCreateDiscordChannelHandle(channel.getChannelId());
-	CallPawnPublic(pawn_, "OnDiscordChannelUpdate", channelHandle);
-	CallPawnPublic(pawn_, "DCC_OnChannelUpdate", channelHandle);
+	CallPawnPublic(pawn_, "DBR_OnChannelUpdate", channelHandle);
 }
 
 void DiscordBridgeComponent::onChannelDeleteEvent(DiscordChannel& channel)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onChannelDelete, channel);
 	const cell channelHandle = GetOrCreateDiscordChannelHandle(channel.getChannelId());
-	CallPawnPublic(pawn_, "OnDiscordChannelDelete", channelHandle);
-	CallPawnPublic(pawn_, "DCC_OnChannelDelete", channelHandle);
+	CallPawnPublic(pawn_, "DBR_OnChannelDelete", channelHandle);
 }
 
 void DiscordBridgeComponent::onMessageCreateEvent(DiscordMessage& message)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onMessageCreate, message);
-	const cell msgHandle = GetOrCreateDiscordMessageHandle(message.getMessageId());
-	CallPawnPublic(pawn_, "OnDiscordMessageCreate", msgHandle);
-	CallPawnPublic(pawn_, "DCC_OnMessageCreate", msgHandle);
+	const cell msgHandle = GetOrCreateDiscordMessageHandle(message.getMessageId(), message.getChannelId());
+	CallPawnPublic(pawn_, "DBR_OnMessageCreate", msgHandle);
 }
 
 void DiscordBridgeComponent::onMessageUpdateEvent(DiscordMessage& message)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onMessageUpdate, message);
-	CallPawnPublic(pawn_, "OnDiscordMessageUpdate", GetOrCreateDiscordMessageHandle(message.getMessageId()));
+	CallPawnPublic(pawn_, "DBR_OnMessageUpdate", GetOrCreateDiscordMessageHandle(message.getMessageId(), message.getChannelId()));
 }
 
 void DiscordBridgeComponent::onMessageDeleteEvent(DiscordMessage& message)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onMessageDelete, message.getChannelId(), message.getMessageId());
-	const cell msgHandle = GetOrCreateDiscordMessageHandle(message.getMessageId());
-	CallPawnPublic(pawn_, "OnDiscordMessageDelete", msgHandle);
-	CallPawnPublic(pawn_, "DCC_OnMessageDelete", msgHandle);
+	const cell msgHandle = GetOrCreateDiscordMessageHandle(message.getMessageId(), message.getChannelId());
+	CallPawnPublic(pawn_, "DBR_OnMessageDelete", msgHandle);
 }
 
 void DiscordBridgeComponent::onBotReadyEvent()
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onBotReady);
-	CallPawnPublic(pawn_, "OnDiscordReady");
-	CallPawnPublic(pawn_, "DCC_OnReady");
-	// A script may register commands before the bot object exists (notably
-	// during open.mp startup).  Flush those registrations after both ready
-	// callbacks have had a chance to create their commands.
-	QueuePendingDiscordCommands(bot_.get());
+	CallPawnPublic(pawn_, "DBR_OnReady");
+	// Publish the application commands scripts created during startup.
+	NotifyDiscordNativesReady();
 }
 
 void DiscordBridgeComponent::onBotDisconnectedEvent()
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onBotDisconnected);
-	CallPawnPublic(pawn_, "OnDiscordDisconnected");
-	CallPawnPublic(pawn_, "DCC_OnDisconnected");
+	CallPawnPublic(pawn_, "DBR_OnDisconnected");
 }
 
 void DiscordBridgeComponent::onGuildCreateEvent(DiscordGuild& guild)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onGuildCreate, guild);
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guild.getGuildId());
-	CallPawnPublic(pawn_, "OnDiscordGuildCreate", guildHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildCreate", guildHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildCreate", guildHandle);
 }
 
 void DiscordBridgeComponent::onGuildUpdateEvent(DiscordGuild& guild)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onGuildUpdate, guild);
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guild.getGuildId());
-	CallPawnPublic(pawn_, "OnDiscordGuildUpdate", guildHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildUpdate", guildHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildUpdate", guildHandle);
 }
 
 void DiscordBridgeComponent::onGuildDeleteEvent(StringView guildId)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onGuildDelete, guildId);
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guildId);
-	CallPawnPublic(pawn_, "OnDiscordGuildDelete", guildHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildDelete", guildHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildDelete", guildHandle);
 }
 
 void DiscordBridgeComponent::onUserUpdateEvent(DiscordUser& user)
 {
 	const cell userHandle = GetOrCreateDiscordUserHandle(user.getUserId());
-	CallPawnPublic(pawn_, "OnDiscordUserUpdate", userHandle);
-	CallPawnPublic(pawn_, "DCC_OnUserUpdate", userHandle);
+	CallPawnPublic(pawn_, "DBR_OnUserUpdate", userHandle);
 }
 
 void DiscordBridgeComponent::onGuildMemberAddEvent(DiscordGuild& guild, DiscordUser& user)
 {
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guild.getGuildId());
 	const cell userHandle = GetOrCreateDiscordUserHandle(user.getUserId());
-	CallPawnPublic(pawn_, "OnDiscordGuildMemberAdd", guildHandle, userHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildMemberAdd", guildHandle, userHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildMemberAdd", guildHandle, userHandle);
 }
 
 void DiscordBridgeComponent::onGuildMemberUpdateEvent(DiscordGuild& guild, DiscordUser& user)
 {
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guild.getGuildId());
 	const cell userHandle = GetOrCreateDiscordUserHandle(user.getUserId());
-	CallPawnPublic(pawn_, "OnDiscordGuildMemberUpdate", guildHandle, userHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildMemberUpdate", guildHandle, userHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildMemberUpdate", guildHandle, userHandle);
 }
 
 void DiscordBridgeComponent::onGuildMemberVoiceUpdateEvent(DiscordGuild& guild, DiscordUser& user, DiscordChannel* channel)
@@ -881,49 +925,43 @@ void DiscordBridgeComponent::onGuildMemberVoiceUpdateEvent(DiscordGuild& guild, 
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guild.getGuildId());
 	const cell userHandle = GetOrCreateDiscordUserHandle(user.getUserId());
 	const cell channelHandle = channel ? GetOrCreateDiscordChannelHandle(channel->getChannelId()) : 0;
-	CallPawnPublic(pawn_, "OnDiscordGuildMemberVoiceUpdate", guildHandle, userHandle, channelHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildMemberVoiceUpdate", guildHandle, userHandle, channelHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildMemberVoiceUpdate", guildHandle, userHandle, channelHandle);
 }
 
 void DiscordBridgeComponent::onGuildMemberRemoveEvent(DiscordGuild& guild, DiscordUser& user)
 {
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guild.getGuildId());
 	const cell userHandle = GetOrCreateDiscordUserHandle(user.getUserId());
-	CallPawnPublic(pawn_, "OnDiscordGuildMemberRemove", guildHandle, userHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildMemberRemove", guildHandle, userHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildMemberRemove", guildHandle, userHandle);
 }
 
 void DiscordBridgeComponent::onGuildRoleCreateEvent(DiscordGuild& guild, DiscordRole& role)
 {
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guild.getGuildId());
 	const cell roleHandle = GetOrCreateDiscordRoleHandle(role.getRoleId());
-	CallPawnPublic(pawn_, "OnDiscordGuildRoleCreate", guildHandle, roleHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildRoleCreate", guildHandle, roleHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildRoleCreate", guildHandle, roleHandle);
 }
 
 void DiscordBridgeComponent::onGuildRoleUpdateEvent(DiscordGuild& guild, DiscordRole& role)
 {
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guild.getGuildId());
 	const cell roleHandle = GetOrCreateDiscordRoleHandle(role.getRoleId());
-	CallPawnPublic(pawn_, "OnDiscordGuildRoleUpdate", guildHandle, roleHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildRoleUpdate", guildHandle, roleHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildRoleUpdate", guildHandle, roleHandle);
 }
 
 void DiscordBridgeComponent::onGuildRoleDeleteEvent(DiscordGuild& guild, DiscordRole& role)
 {
 	const cell guildHandle = GetOrCreateDiscordGuildHandle(guild.getGuildId());
 	const cell roleHandle = GetOrCreateDiscordRoleHandle(role.getRoleId());
-	CallPawnPublic(pawn_, "OnDiscordGuildRoleDelete", guildHandle, roleHandle);
-	CallPawnPublic(pawn_, "DCC_OnGuildRoleDelete", guildHandle, roleHandle);
+	CallPawnPublic(pawn_, "DBR_OnGuildRoleDelete", guildHandle, roleHandle);
 }
 
 void DiscordBridgeComponent::onMessageReactionEvent(DiscordMessage& message, DiscordUser* reactionUser, cell emojiHandle, StringView emojiToken, int reactionType)
 {
 	eventDispatcher_.dispatch(&IDiscordEventHandler::onMessageReaction, message, reactionUser, emojiToken, reactionType);
-	const cell messageHandle = GetOrCreateDiscordMessageHandle(message.getMessageId());
+	const cell messageHandle = GetOrCreateDiscordMessageHandle(message.getMessageId(), message.getChannelId());
 	const cell userHandle = reactionUser ? GetOrCreateDiscordUserHandle(reactionUser->getUserId()) : 0;
-	CallPawnPublic(pawn_, "OnDiscordMessageReaction", messageHandle, userHandle, emojiHandle, reactionType);
-	CallPawnPublic(pawn_, "DCC_OnMessageReaction", messageHandle, userHandle, emojiHandle, reactionType);
+	CallPawnPublic(pawn_, "DBR_OnMessageReaction", messageHandle, userHandle, emojiHandle, reactionType);
 }
 
 DiscordBridgeComponent::~DiscordBridgeComponent()
