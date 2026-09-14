@@ -17,6 +17,8 @@
 #include "discord-json.hpp"
 #include "utils.hpp"
 #include <algorithm>
+#include <array>
+#include <utility>
 #include <amx/amx.h>
 #include <amx/amx2.h>
 #include <unordered_map>
@@ -207,7 +209,7 @@ cell assignEmojiHandle(const std::string& emojiToken)
 	return handle;
 }
 
-std::string getAmxString(AMX* amx, cell amxParam)
+std::string getAmxStringRaw(AMX* amx, cell amxParam)
 {
 	NativePawnScript* script = pawnScriptFor(amx);
 	if (!script)
@@ -250,7 +252,8 @@ bool setAmxString(AMX* amx, cell amxParam, const std::string& value, size_t maxS
 		return false;
 	}
 
-	return script->SetString(addr, StringView(value), false, false, maxSize) == AMX_ERR_NONE;
+	const std::string converted = toPawnText(value);
+	return script->SetString(addr, StringView(converted), false, false, maxSize) == AMX_ERR_NONE;
 }
 
 bool setAmxString(AMX* amx, cell amxParam, const std::string& value, cell maxSize)
@@ -303,6 +306,28 @@ void logWarning(const std::string& message)
 	DiscordLogWarning(bridge ? bridge->getCore() : nullptr, message);
 }
 
+// Pawn scripts hold Windows-1252 text unless DBR_SetTextEncoding selects UTF-8;
+// Discord always uses UTF-8.
+constexpr cell TEXT_ENCODING_ANSI = 0;
+constexpr cell TEXT_ENCODING_UTF8 = 1;
+cell g_textEncoding = TEXT_ENCODING_ANSI;
+
+std::string fromPawnText(const std::string& text)
+{
+	// Valid UTF-8 passes through, so UTF-8 scripts also work in ANSI mode.
+	return DiscordUtils::isValidUtf8(text) ? text : DiscordUtils::windows1252ToUtf8(text);
+}
+
+std::string toPawnText(const std::string& text)
+{
+	return g_textEncoding == TEXT_ENCODING_UTF8 ? text : DiscordUtils::utf8ToWindows1252(text);
+}
+
+std::string getAmxString(AMX* amx, cell amxParam)
+{
+	return fromPawnText(getAmxStringRaw(amx, amxParam));
+}
+
 // Informational messages are only printed in debug mode; warnings always are.
 bool g_debugMode = false;
 bool g_connectIgnoredWarned = false;
@@ -332,7 +357,7 @@ void reportActionFailure(const std::string& action, const DiscordHTTP::Response&
 	}
 	if (message.size() > 256) message.resize(256);
 	callPawnPublic("DBR_OnActionFail", 1, StringView(action), static_cast<cell>(response.statusCode),
-		static_cast<cell>(code), StringView(message));
+		static_cast<cell>(code), StringView(toPawnText(message)));
 }
 
 bool submitAction(const std::string& action, RestRequest request, RestCompletion completion)
@@ -438,7 +463,7 @@ bool executePawnCallback(const PreparedPawnCallback& prepared, const std::vector
 
 bool callbackParametersValid(AMX* amx, cell callbackParam, cell formatParam, cell* params, size_t firstParam)
 {
-	const std::string callback = getAmxString(amx, callbackParam);
+	const std::string callback = getAmxStringRaw(amx, callbackParam);
 	// An empty callback is valid; its format and variadic arguments are then
 	// ignored.
 	if (callback.empty()) return true;
@@ -451,7 +476,7 @@ bool callbackParametersValid(AMX* amx, cell callbackParam, cell formatParam, cel
 	int publicIndex = -1;
 	if (script->FindPublic(callback.c_str(), &publicIndex) != AMX_ERR_NONE || publicIndex < 0) return false;
 
-	const std::string format = getAmxString(amx, formatParam);
+	const std::string format = getAmxStringRaw(amx, formatParam);
 	if (params[0] < 0 || params[0] % static_cast<cell>(sizeof(cell)) != 0) return false;
 	const size_t supplied = params[0] > 0 ? static_cast<size_t>(params[0]) / sizeof(cell) : 0;
 	if (firstParam == 0 || firstParam - 1 > supplied || format.size() != supplied - (firstParam - 1)) return false;
@@ -517,9 +542,9 @@ bool capturePawnCallback(AMX* amx, cell callbackParam, cell formatParam, cell* p
 	prepared.reset();
 	if (!callbackParametersValid(amx, callbackParam, formatParam, params, firstParam)) return false;
 
-	const std::string callback = getAmxString(amx, callbackParam);
+	const std::string callback = getAmxStringRaw(amx, callbackParam);
 	if (callback.empty()) return true;
-	const std::string format = getAmxString(amx, formatParam);
+	const std::string format = getAmxStringRaw(amx, formatParam);
 	if (params[0] < 0 || params[0] % static_cast<cell>(sizeof(cell)) != 0) return false;
 	const size_t supplied = params[0] > 0 ? static_cast<size_t>(params[0]) / sizeof(cell) : 0;
 	if (firstParam == 0 || firstParam - 1 > supplied || format.size() != supplied - (firstParam - 1)) return false;
@@ -557,7 +582,7 @@ bool capturePawnCallback(AMX* amx, cell callbackParam, cell formatParam, cell* p
 			if (pendingArray != static_cast<size_t>(-1)) return false;
 			PawnCallbackArg arg;
 			arg.type = PawnCallbackArg::Type::String;
-			arg.text = getAmxString(amx, parameter);
+			arg.text = getAmxStringRaw(amx, parameter);
 			prepared->args.push_back(std::move(arg));
 			continue;
 		}
@@ -596,7 +621,7 @@ std::string messagePayload(const std::string& content, const DiscordBuilders::Em
 	DiscordJson body = DiscordJson::object();
 	if (!content.empty()) body["content"] = content;
 	if (embed) body["embeds"] = DiscordJson::array({ embed->toJson() });
-	return body.dump();
+	return body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 }
 
 void completeMessageResponse(bool success, const std::string& responseBody,
@@ -816,6 +841,18 @@ cell AMX_NATIVE_CALL Native_DisconnectBot(AMX*, cell*)
 {
 	DiscordBridgeComponent* bridge = component();
 	return bridge && bridge->requestDisconnect() ? 1 : 0;
+}
+
+cell AMX_NATIVE_CALL Native_SetTextEncoding(AMX*, cell* params)
+{
+	if (nativeParamCount(params) < 1 || (params[1] != TEXT_ENCODING_ANSI && params[1] != TEXT_ENCODING_UTF8)) return 0;
+	g_textEncoding = params[1];
+	return 1;
+}
+
+cell AMX_NATIVE_CALL Native_GetTextEncoding(AMX*, cell*)
+{
+	return g_textEncoding;
 }
 
 cell AMX_NATIVE_CALL Native_SetDebugMode(AMX*, cell* params)
@@ -1786,7 +1823,7 @@ cell AMX_NATIVE_CALL Native_CreateGuildChannel(AMX* amx, cell* params)
 	if (!capturePawnCallback(amx, params[4], params[5], params, 6, callback)) return 0;
 	DiscordBot* bot = nativeBot();
 	if (!bot) return 0;
-	const std::string body = DiscordJson { { "name", name }, { "type", static_cast<int>(type) } }.dump();
+	const std::string body = DiscordJson { { "name", name }, { "type", static_cast<int>(type) } }.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 	return bot->submitRestTask([bot, guildId, body, callback](DiscordHTTP& rest)
 	{
 		const auto response = rest.createGuildChannel(guildId, body);
@@ -1905,7 +1942,7 @@ cell AMX_NATIVE_CALL Native_CreateGuildRole(AMX* amx, cell* params)
 	if (!capturePawnCallback(amx, params[3], params[4], params, 5, callback)) return 0;
 	DiscordBot* bot = nativeBot();
 	if (!bot) return 0;
-	const std::string body = DiscordJson { { "name", name } }.dump();
+	const std::string body = DiscordJson { { "name", name } }.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 	return bot->submitRestTask([bot, guildId, body, callback](DiscordHTTP& rest)
 	{
 		const auto response = rest.createGuildRole(guildId, body);
@@ -2119,6 +2156,8 @@ void appendCoreNatives(std::vector<AMX_NATIVE_INFO>& natives)
 		{ "DBR_DisconnectBot", Native_DisconnectBot },
 		{ "DBR_SetDebugMode", Native_SetDebugMode },
 		{ "DBR_IsDebugMode", Native_IsDebugMode },
+		{ "DBR_SetTextEncoding", Native_SetTextEncoding },
+		{ "DBR_GetTextEncoding", Native_GetTextEncoding },
 
 		{ "DBR_FindChannelByID", Native_FindChannelById },
 		{ "DBR_FindChannelByName", Native_FindChannelByName },
@@ -2229,6 +2268,39 @@ void appendCoreNatives(std::vector<AMX_NATIVE_INFO>& natives)
 
 using namespace DiscordNatives;
 
+namespace
+{
+constexpr std::size_t MAX_GUARDED_NATIVES = 512;
+AMX_NATIVE g_nativeTargets[MAX_GUARDED_NATIVES] {};
+const char* g_nativeNames[MAX_GUARDED_NATIVES] {};
+
+template <std::size_t Index>
+cell AMX_NATIVE_CALL guardedNative(AMX* amx, cell* params)
+{
+	try
+	{
+		return g_nativeTargets[Index](amx, params);
+	}
+	catch (const std::exception& exception)
+	{
+		logWarning(std::string("[DiscordBridge] ") + g_nativeNames[Index] + " failed: " + exception.what());
+	}
+	catch (...)
+	{
+		logWarning(std::string("[DiscordBridge] ") + g_nativeNames[Index] + " failed with an unknown exception");
+	}
+	return 0;
+}
+
+template <std::size_t... Indexes>
+constexpr std::array<AMX_NATIVE, sizeof...(Indexes)> makeGuardedNatives(std::index_sequence<Indexes...>)
+{
+	return { { &guardedNative<Indexes>... } };
+}
+
+constexpr auto kGuardedNatives = makeGuardedNatives(std::make_index_sequence<MAX_GUARDED_NATIVES>());
+}
+
 int RegisterDiscordNatives(IPawnScript& script)
 {
 	static const std::vector<AMX_NATIVE_INFO> kNativeList = []()
@@ -2238,6 +2310,19 @@ int RegisterDiscordNatives(IPawnScript& script)
 		appendCoreNatives(natives);
 		appendInteractionNatives(natives);
 		appendManagementNatives(natives);
+		// An exception must never unwind through the AMX's C code, so each
+		// native runs inside a guard that logs it and returns 0 instead.
+		const std::size_t guarded = std::min(natives.size(), MAX_GUARDED_NATIVES);
+		for (std::size_t index = 0; index < guarded; ++index)
+		{
+			g_nativeTargets[index] = natives[index].func;
+			g_nativeNames[index] = natives[index].name;
+			natives[index].func = kGuardedNatives[index];
+		}
+		if (natives.size() > MAX_GUARDED_NATIVES)
+		{
+			logWarning("[DiscordBridge] more natives than exception guards; raise MAX_GUARDED_NATIVES");
+		}
 		return natives;
 	}();
 	return script.Register(kNativeList.data(), static_cast<int>(kNativeList.size()));

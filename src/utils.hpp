@@ -15,6 +15,12 @@ namespace DiscordUtils
 	std::string urlEncode(const std::string& str);
 	std::string base64Encode(const std::string& data);
 
+	// Discord requires UTF-8; SA-MP and open.mp scripts usually hold Windows-1252.
+	bool isValidUtf8(const std::string& text);
+	std::string windows1252ToUtf8(const std::string& text);
+	// Characters without a Windows-1252 byte (emojis, other scripts) become '?'.
+	std::string utf8ToWindows1252(const std::string& text);
+
 	std::string extractJsonString(const std::string& json, const std::string& key);
 	int64_t extractJsonInt(const std::string& json, const std::string& key);
 	bool extractJsonBool(const std::string& json, const std::string& key);

@@ -79,6 +79,8 @@ public:
 	StringView getBotUsername() const override;
 	bool isConnected() const override;
 	bool isConnecting() const { return connecting_.load(); }
+	// True once DBR_OnReady has been dispatched for this connection.
+	bool isReady() const { return readyEventSent_; }
 
 	bool setPresenceStatus(EDiscordPresenceStatus status) override;
 	bool setActivity(EDiscordActivityType type, StringView name) override;

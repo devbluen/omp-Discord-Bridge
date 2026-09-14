@@ -58,7 +58,13 @@ NativePawnScript* pawnScriptFor(AMX* amx);
 NativePawnScript* pawnScriptForId(int scriptId);
 NativePawnScript* findPawnScriptWithPublic(const char* name, NativePawnScript* preferred = nullptr);
 
+// Reads a script string converted to UTF-8 for Discord.
 std::string getAmxString(AMX* amx, cell amxParam);
+// Reads a script string exactly as the script stores it.
+std::string getAmxStringRaw(AMX* amx, cell amxParam);
+std::string fromPawnText(const std::string& text);
+// Converts Discord's UTF-8 to the script's encoding (see DBR_SetTextEncoding).
+std::string toPawnText(const std::string& text);
 bool setAmxString(AMX* amx, cell amxParam, const std::string& value, cell maxSize);
 cell* nativeRef(AMX* amx, cell address);
 bool isDiscordSnowflake(const std::string& value);

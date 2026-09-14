@@ -68,7 +68,12 @@ void SampPawnComponent::load(AMX* amx)
 	}
 
 	auto script = std::make_unique<SampPawnScript>(amx, nextScriptId_++);
-	if (RegisterDiscordNatives(*script) != AMX_ERR_NONE)
+	// amx_Register reports AMX_ERR_NOTFOUND whenever the script also uses
+	// natives from plugins that register after this one (sscanf, streamer...).
+	// Our natives are registered anyway, so only other errors drop the script;
+	// otherwise the gamemode would never receive callbacks or string arguments.
+	const int error = RegisterDiscordNatives(*script);
+	if (error != AMX_ERR_NONE && error != AMX_ERR_NOTFOUND)
 	{
 		return;
 	}

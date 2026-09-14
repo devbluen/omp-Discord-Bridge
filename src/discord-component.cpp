@@ -4,6 +4,7 @@
  */
 
 #include "discord-component.hpp"
+#include "discord-log.hpp"
 #include "natives.hpp"
 #include "discord-http.hpp"
 #include "discord-json.hpp"
@@ -81,6 +82,7 @@ void DiscordBridgeComponent::onLoad(ICore* c)
 {
 	sampMode_ = false;
 	core_ = c;
+	DiscordLogSetMainThread();
 	if (!core_)
 	{
 		return;
@@ -332,6 +334,7 @@ void DiscordBridgeComponent::free()
 
 void DiscordBridgeComponent::reset()
 {
+	scriptsAwaitingReady_.clear();
 	disconnectRequested_ = false;
 	reconnectRequested_ = false;
 	reconnectToken_.clear();
@@ -500,6 +503,7 @@ void DiscordBridgeComponent::onPlayerConnect(IPlayer& player)
 void DiscordBridgeComponent::onAmxLoad(IPawnScript& script)
 {
 	RegisterDiscordNatives(script);
+	queueReadyForScript(&script);
 }
 
 void DiscordBridgeComponent::onAmxUnload(IPawnScript& script)
@@ -510,6 +514,46 @@ void DiscordBridgeComponent::onAmxUnload(IPawnScript& script)
 void DiscordBridgeComponent::onAmxLoad(AMX* amx)
 {
 	sampPawn_.load(amx);
+	queueReadyForScript(sampPawn_.getScript(amx));
+}
+
+void DiscordBridgeComponent::queueReadyForScript(IPawnScript* script)
+{
+	if (script && bot_ && bot_->isReady()) scriptsAwaitingReady_.push_back(script->GetID());
+}
+
+void DiscordBridgeComponent::deliverReadyToLateScripts()
+{
+	if (scriptsAwaitingReady_.empty() || !pawn_) return;
+	const std::vector<int> pending = std::move(scriptsAwaitingReady_);
+	scriptsAwaitingReady_.clear();
+	if (!bot_ || !bot_->isReady()) return;
+
+	auto deliver = [](IPawnScript* script)
+	{
+		int publicIndex = -1;
+		if (!script || !script->IsLoaded() || script->FindPublic("DBR_OnReady", &publicIndex) != AMX_ERR_NONE ||
+			publicIndex < 0 || publicIndex == INT_MAX) return;
+		cell result = 1;
+		const int error = script->CallChecked(publicIndex, result);
+		if (error != AMX_ERR_NONE) script->PrintError(error);
+	};
+	for (const int id : pending)
+	{
+		if (IPawnScript* main = pawn_->mainScript(); main && main->GetID() == id)
+		{
+			deliver(main);
+			continue;
+		}
+		for (IPawnScript* side : pawn_->sideScripts())
+		{
+			if (side && side->GetID() == id)
+			{
+				deliver(side);
+				break;
+			}
+		}
+	}
 }
 
 void DiscordBridgeComponent::onAmxUnload(AMX* amx)
@@ -519,14 +563,32 @@ void DiscordBridgeComponent::onAmxUnload(AMX* amx)
 
 void DiscordBridgeComponent::onTick(Microseconds, TimePoint)
 {
-	ServiceDiscordNatives();
-	if (bot_)
+	DiscordLogFlush(core_);
+	// ProcessTick is called from the server's C code: an exception escaping here
+	// crashes the server (and shows up in whichever crash handler is installed,
+	// such as FCNPC's).
+	try
 	{
-		insideBotUpdate_ = true;
-		bot_->update();
-		insideBotUpdate_ = false;
+		ServiceDiscordNatives();
+		deliverReadyToLateScripts();
+		if (bot_)
+		{
+			insideBotUpdate_ = true;
+			bot_->update();
+			insideBotUpdate_ = false;
+		}
+		performPendingDisconnect();
 	}
-	performPendingDisconnect();
+	catch (const std::exception& exception)
+	{
+		insideBotUpdate_ = false;
+		DiscordLogWarning(core_, std::string("[DiscordBridge] tick failed: ") + exception.what());
+	}
+	catch (...)
+	{
+		insideBotUpdate_ = false;
+		DiscordLogWarning(core_, "[DiscordBridge] tick failed with an unknown exception");
+	}
 }
 
 DiscordBridgeComponent* DiscordBridgeComponent::getInstance()
@@ -614,7 +676,7 @@ DiscordChannel* DiscordBridgeComponent::upsertChannelFromJson(const std::string&
 		return it->second.get();
 	}
 	if (!bot_) return nullptr;
-	auto channel = std::make_unique<DiscordChannel>(bot_.get(), id, data.value("name", std::string()), static_cast<EDiscordChannelType>(data.value("type", 0)));
+	auto channel = std::make_unique<DiscordChannel>(bot_.get(), id, jsonString(data, "name"), static_cast<EDiscordChannelType>(jsonInt(data, "type", 0)));
 	channel->updateFromJson(json);
 	DiscordChannel* raw = channel.get();
 	storeChannel(std::move(channel));
@@ -640,7 +702,7 @@ DiscordGuild* DiscordBridgeComponent::upsertGuildFromJson(const std::string& jso
 	else
 	{
 		if (!bot_) return nullptr;
-		auto guild = std::make_unique<DiscordGuild>(bot_.get(), this, id, data.value("name", std::string()));
+		auto guild = std::make_unique<DiscordGuild>(bot_.get(), this, id, jsonString(data, "name"));
 		guild->updateFromJson(json, includeMembers);
 		raw = guild.get();
 		storeGuild(std::move(guild));
@@ -650,14 +712,14 @@ DiscordGuild* DiscordBridgeComponent::upsertGuildFromJson(const std::string& jso
 	{
 		for (const auto& channel : data["channels"])
 		{
-			if (channel.is_object()) upsertChannelFromJson(channel.dump());
+			if (channel.is_object()) upsertChannelFromJson(channel.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 		}
 	}
 	if ((data.find("roles") != data.end()) && data["roles"].is_array())
 	{
 		for (const auto& role : data["roles"])
 		{
-			if (role.is_object()) upsertRoleFromJson(role.dump(), id);
+			if (role.is_object()) upsertRoleFromJson(role.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), id);
 		}
 	}
 	if (includeMembers && (data.find("members") != data.end()) && data["members"].is_array())
@@ -665,7 +727,7 @@ DiscordGuild* DiscordBridgeComponent::upsertGuildFromJson(const std::string& jso
 		for (const auto& member : data["members"])
 		{
 			if (!member.is_object()) continue;
-			if ((member.find("user") != member.end()) && member["user"].is_object()) upsertUserFromJson(member["user"].dump());
+			if ((member.find("user") != member.end()) && member["user"].is_object()) upsertUserFromJson(member["user"].dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 		}
 	}
 	if ((data.find("presences") != data.end()) && data["presences"].is_array())
@@ -674,7 +736,7 @@ DiscordGuild* DiscordBridgeComponent::upsertGuildFromJson(const std::string& jso
 		{
 			if (!presence.is_object()) continue;
 			const DiscordJson user = presence.value("user", DiscordJson::object());
-			if (user.is_object()) upsertUserFromJson(user.dump());
+			if (user.is_object()) upsertUserFromJson(user.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 		}
 	}
 	return raw;
@@ -691,7 +753,7 @@ DiscordUser* DiscordBridgeComponent::upsertUserFromJson(const std::string& json)
 		it->second->updateFromJson(json);
 		return it->second.get();
 	}
-	auto user = std::make_unique<DiscordUser>(id, data.value("username", std::string()), data.value("discriminator", std::string()), data.value("bot", false));
+	auto user = std::make_unique<DiscordUser>(id, jsonString(data, "username"), jsonString(data, "discriminator"), jsonBool(data, "bot", false));
 	user->updateFromJson(json);
 	DiscordUser* raw = user.get();
 	storeUser(std::move(user));
@@ -717,9 +779,9 @@ DiscordMessage* DiscordBridgeComponent::upsertMessageFromJson(const std::string&
 	const DiscordJson data = DiscordJson::parse(json, nullptr, false);
 	if (data.is_discarded() || !data.is_object() || !(data.find("id") != data.end()) || !data["id"].is_string()) return nullptr;
 	const std::string id = data["id"].get<std::string>();
-	if ((data.find("author") != data.end()) && data["author"].is_object()) upsertUserFromJson(data["author"].dump());
-	const std::string channelId = data.value("channel_id", std::string());
-	const std::string authorId = (data.find("author") != data.end()) && data["author"].is_object() ? data["author"].value("id", std::string()) : std::string();
+	if ((data.find("author") != data.end()) && data["author"].is_object()) upsertUserFromJson(data["author"].dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
+	const std::string channelId = jsonString(data, "channel_id");
+	const std::string authorId = (data.find("author") != data.end()) && data["author"].is_object() ? jsonString(data["author"], "id") : std::string();
 	const auto it = messages_.find(id);
 	if (it != messages_.end())
 	{
@@ -727,7 +789,7 @@ DiscordMessage* DiscordBridgeComponent::upsertMessageFromJson(const std::string&
 		return it->second.get();
 	}
 	if (!bot_) return nullptr;
-	auto message = std::make_unique<DiscordMessage>(bot_.get(), id, channelId, authorId, data.value("content", std::string()));
+	auto message = std::make_unique<DiscordMessage>(bot_.get(), id, channelId, authorId, jsonString(data, "content"));
 	message->updateFromJson(json);
 	DiscordMessage* raw = message.get();
 	storeMessage(std::move(message));
@@ -750,7 +812,7 @@ DiscordRole* DiscordBridgeComponent::upsertRoleFromJson(const std::string& json,
 		}
 		return it->second.get();
 	}
-	auto role = std::make_unique<DiscordRole>(id, data.value("name", std::string()));
+	auto role = std::make_unique<DiscordRole>(id, jsonString(data, "name"));
 	role->updateFromJson(json);
 	if (!guildId.empty()) role->setGuildId(guildId);
 	DiscordRole* raw = role.get();

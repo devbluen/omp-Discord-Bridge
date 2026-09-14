@@ -279,6 +279,18 @@ printed:
 DBR_SetDebugMode(true);
 ```
 
+### Accents and text encoding
+
+Discord uses UTF-8, while SA-MP and open.mp scripts usually store text as
+Windows-1252. The plugin converts in both directions: accents you send appear
+correctly on Discord, and accents received from Discord appear correctly in the
+game. Characters that Windows-1252 cannot represent, such as emojis, arrive as
+`?`. If your script's strings are UTF-8, turn the incoming conversion off:
+
+```pawn
+DBR_SetTextEncoding(DISCORD_ENCODING_UTF8);
+```
+
 ## Quick guide
 
 ### Sending messages and embeds
@@ -530,8 +542,8 @@ The dependencies (OpenSSL and Boost) are installed automatically by
 
 Outputs in `build/windows-x86/`:
 
-- `plugins/Release/discord-bridge.dll`, `libssl-3.dll` and `libcrypto-3.dll`:
-  copy **all three** to the server (`components/` on open.mp, `plugins/` on SA-MP);
+- `plugins/Release/discord-bridge.dll`: the plugin, with OpenSSL built in, so it
+  is the only file to copy (`components/` on open.mp, `plugins/` on SA-MP);
 - `pawno/include/discord-bridge.inc`: the include.
 
 Windows servers are 32-bit, so the preset always builds for Win32.

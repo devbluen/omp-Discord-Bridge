@@ -6,6 +6,7 @@
 #pragma once
 
 #include "samp-amx.hpp"
+#include "samp-plugin.hpp"
 #include <Impl/pool_impl.hpp>
 #include <Server/Components/Pawn/pawn.hpp>
 #include <sdk.hpp>
@@ -121,15 +122,24 @@ public:
 		return SampAmx::push(amx_, value);
 	}
 
+	// The SDK's CallChecked passes null output addresses, which open.mp accepts.
+	// SA-MP's AMX (Pawn 3.2) writes through them unconditionally in amx_Allot,
+	// so always hand it real storage.
 	int PushArray(cell* amxAddress, cell** physicalAddress, const cell array[], int cells) override
 	{
-		return SampAmx::pushArray(amx_, amxAddress, physicalAddress, array, cells);
+		cell unusedAmxAddress = 0;
+		cell* unusedPhysicalAddress = nullptr;
+		return SampAmx::pushArray(amx_, amxAddress ? amxAddress : &unusedAmxAddress,
+			physicalAddress ? physicalAddress : &unusedPhysicalAddress, array, cells);
 	}
 
 	int PushString(cell* amxAddress, cell** physicalAddress, StringView source, bool pack, bool useWchar) override
 	{
 		const std::string value(source.data(), source.length());
-		return SampAmx::pushString(amx_, amxAddress, physicalAddress, value.c_str(), pack ? 1 : 0, useWchar ? 1 : 0);
+		cell unusedAmxAddress = 0;
+		cell* unusedPhysicalAddress = nullptr;
+		return SampAmx::pushString(amx_, amxAddress ? amxAddress : &unusedAmxAddress,
+			physicalAddress ? physicalAddress : &unusedPhysicalAddress, value.c_str(), pack ? 1 : 0, useWchar ? 1 : 0);
 	}
 
 	int Register(const AMX_NATIVE_INFO* natives, int count) override
@@ -168,7 +178,11 @@ public:
 	void SetFRM(cell value) override { if (amx_) amx_->frm = value; }
 
 	AMX* GetAMX() override { return amx_; }
-	void PrintError(int) override { }
+	void PrintError(int error) override
+	{
+		// Runtime errors inside Discord callbacks would otherwise vanish.
+		if (logprintf && error != AMX_ERR_NONE) logprintf("[DiscordBridge] AMX error %d while running a Discord callback", error);
+	}
 
 	int GetID() const override { return id_; }
 	bool IsLoaded() const override { return loaded_ && amx_ != nullptr; }

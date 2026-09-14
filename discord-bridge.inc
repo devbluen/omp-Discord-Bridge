@@ -307,6 +307,20 @@ native DBR_DisconnectBot();
 native DBR_SetDebugMode(bool:enabled);
 native bool:DBR_IsDebugMode();
 
+// How the script's strings are encoded.  ANSI (Windows-1252, the default)
+// suits SA-MP and open.mp gamemodes with accents: text sent to Discord is
+// converted to UTF-8, and text received from Discord is converted back, with
+// characters Windows-1252 lacks (such as emojis) becoming '?'.  Choose UTF-8
+// when the script's strings are UTF-8.
+enum DiscordTextEncoding
+{
+	DISCORD_ENCODING_ANSI = 0,
+	DISCORD_ENCODING_UTF8 = 1
+};
+
+native DBR_SetTextEncoding(DiscordTextEncoding:encoding);
+native DiscordTextEncoding:DBR_GetTextEncoding();
+
 // -----------------------------------------------------------------------------
 // Channels
 // -----------------------------------------------------------------------------
