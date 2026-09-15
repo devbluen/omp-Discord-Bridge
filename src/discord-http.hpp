@@ -19,6 +19,8 @@
 #include <mutex>
 #include <unordered_map>
 #include <chrono>
+#include <functional>
+#include "discord-rate-limit.hpp"
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -46,7 +48,11 @@ private:
 	std::string applicationId_;
 	ICore* core_;
 	mutable std::mutex requestMutex_;
-	std::chrono::steady_clock::time_point globalBlockedUntil_{};
+	struct Transport;
+	std::unique_ptr<Transport> transport_;
+	DiscordRateLimits rateLimits_;
+	unsigned* taskRetries_ = nullptr;
+	DiscordRateLimits::Time eligibleAt_ {};
 	std::string lastFailureLogKey_;
 	std::chrono::steady_clock::time_point lastFailureLogAt_{};
 
@@ -58,7 +64,11 @@ private:
 
 public:
 	DiscordHTTP(ICore* core, const std::string& token);
-	~DiscordHTTP() = default;
+	~DiscordHTTP();
+	// Tasks may be deferred before a request or after a rejected (429) request.
+	// Cache completed steps in tasks that perform more than one request.
+	void runTask(const std::function<void(DiscordHTTP&)>& task, unsigned& retries,
+		DiscordRateLimits::Time eligibleAt);
 
 	// Generic request against the REST API.  `auditReason` becomes the
 	// X-Audit-Log-Reason header shown in the guild's audit log.

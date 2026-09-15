@@ -77,6 +77,29 @@ No seu script:
 #include <discord-bridge>
 ```
 
+#### Scripts existentes do Discord Connector
+
+Instale o include principal `discord-bridge.inc` da release do bridge.
+Copie `discord-dcc-compat.inc` e `discord-connector.inc` do repositório
+[omp-Discord-Bridge-compat](https://github.com/itsneufox/omp-Discord-Bridge-compat)
+para a mesma pasta de includes, substituindo o `discord-connector.inc` antigo.
+Mantenha `#include <discord-connector>`. Também é possível usar
+`#include <discord-dcc-compat>` diretamente. Recompile os scripts e carregue o
+binário correspondente do **Discord Bridge** no lugar do Discord Connector.
+Arquivos `.amx` compilados com o connector original precisam ser recompilados.
+Configure o bot conforme as instruções abaixo.
+
+A compatibilidade cobre APIs DCC com equivalente no bridge: nomes, tags,
+enums, callbacks, embeds, moderação e comandos. Callbacks assíncronos mantêm
+os argumentos originais e os getters `DCC_GetCreated*()`. Comandos mantêm o
+campo de texto opcional `arguments`. `DCC_On*` e `DBR_On*` representam o mesmo
+public; defina cada evento apenas uma vez por script.
+
+Sem equivalente no bridge, estas funções ficam de fora:
+`DCC_GetUserDiscriminator`, `DCC_GetInteractionMentionCount` e
+`DCC_GetInteractionMention`. Scripts que usam essas funções precisam de
+ajustes. A compatibilidade é de código-fonte para o subconjunto suportado.
+
 ### 2. Crie o bot no Discord
 
 1. Acesse o [Discord Developer Portal](https://discord.com/developers/applications)
@@ -546,7 +569,8 @@ Resultados em `build/windows-x86/`:
 
 - `plugins/Release/discord-bridge.dll`: o plugin, com o OpenSSL embutido, então é
   o único arquivo a copiar (`components/` no open.mp, `plugins/` no SA-MP);
-- `pawno/include/discord-bridge.inc`: o include.
+- `pawno/include/discord-bridge.inc`: o include principal. Os includes de
+  compatibilidade ficam no [omp-Discord-Bridge-compat](https://github.com/itsneufox/omp-Discord-Bridge-compat).
 
 Servidores Windows são 32 bits, então o preset sempre compila para Win32.
 
@@ -569,3 +593,8 @@ Use `-DDISCORD_BRIDGE_VERSION=X.Y.Z` em qualquer plataforma para definir a vers�
 
 Ferramentas de IA ajudaram em partes do código e da documentação. Revise o
 código e teste o plugin no seu servidor antes de usar em produção.
+
+## Licença
+
+Distribuído sob a [licença MIT](LICENSE). O código de terceiros incluído mantém
+suas próprias licenças.

@@ -157,6 +157,7 @@ bool DiscordBot::connect()
 		enqueueGatewayMessage(payload);
 	});
 	shouldStop_ = false;
+	restQueue_.reset();
 	restStop_ = false;
 	connected_ = false;
 	connecting_ = true;
@@ -263,7 +264,7 @@ void DiscordBot::stop()
 {
 	shouldStop_ = true;
 	restStop_ = true;
-	restTasksCondition_.notify_all();
+	restQueue_.stop();
 	connected_ = false;
 	// The REST handshake runs on its own thread.  Wait for it before touching
 	// the websocket object so shutdown cannot race its final connect call.
@@ -277,10 +278,7 @@ void DiscordBot::stop()
 		std::lock_guard<std::mutex> lock(gatewayEventsMutex_);
 		gatewayEvents_.clear();
 	}
-	{
-		std::lock_guard<std::mutex> lock(restTasksMutex_);
-		restTasks_.clear();
-	}
+
 	{
 		std::lock_guard<std::mutex> lock(completionTasksMutex_);
 		completionTasks_.clear();
@@ -374,23 +372,13 @@ void DiscordBot::update()
 bool DiscordBot::submitRestTask(std::function<void(DiscordHTTP&)> task)
 {
 	if (!task || shouldStop_ || restStop_ || !http_) return false;
+	return restQueue_.push([this, task = std::move(task)](unsigned& retries, DiscordRateLimits::Time eligibleAt)
 	{
-		std::lock_guard<std::mutex> lock(restTasksMutex_);
-		if (restStop_ || shouldStop_) return false;
-		if (restTasks_.size() >= 4096)
-		{
-			if (!restQueueLimitLogged_)
-			{
-				DiscordLogWarning(core_, "[DiscordBridge] Discord REST queue limit reached; request dropped");
-				restQueueLimitLogged_ = true;
-			}
-			return false;
-		}
-		if (restTasks_.size() < 2048) restQueueLimitLogged_ = false;
-		restTasks_.push_back(std::move(task));
-	}
-	restTasksCondition_.notify_one();
-	return true;
+		if (!shouldStop_ && http_) http_->runTask(task, retries, eligibleAt);
+	}, [this]()
+	{
+		DiscordLogWarning(core_, "[DiscordBridge] Discord REST queue limit reached; request dropped");
+	});
 }
 
 void DiscordBot::enqueueCompletion(std::function<void()> task)
@@ -412,35 +400,10 @@ void DiscordBot::enqueueCompletion(std::function<void()> task)
 
 void DiscordBot::runRestTasks()
 {
-	for (;;)
+	restQueue_.run([this](const std::exception& exception)
 	{
-		std::function<void(DiscordHTTP&)> task;
-		{
-			std::unique_lock<std::mutex> lock(restTasksMutex_);
-			restTasksCondition_.wait(lock, [this]() { return restStop_ || !restTasks_.empty(); });
-			if (restStop_)
-			{
-				restTasks_.clear();
-				return;
-			}
-			task = std::move(restTasks_.front());
-			restTasks_.pop_front();
-			if (restTasks_.size() < 2048) restQueueLimitLogged_ = false;
-		}
-
-		try
-		{
-			if (task && http_ && !shouldStop_) task(*http_);
-		}
-		catch (const std::exception& exception)
-		{
-			DiscordLogWarning(core_, std::string("[DiscordBridge] Discord REST task failed: ") + exception.what());
-		}
-		catch (...)
-		{
-			DiscordLogWarning(core_, "[DiscordBridge] Discord REST task failed with an unknown exception");
-		}
-	}
+		DiscordLogWarning(core_, std::string("[DiscordBridge] Discord REST task failed: ") + exception.what());
+	});
 }
 
 void DiscordBot::serviceMemberSyncRetries()

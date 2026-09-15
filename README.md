@@ -77,6 +77,34 @@ In your script:
 #include <discord-bridge>
 ```
 
+#### Existing Discord Connector scripts
+
+Install the primary `discord-bridge.inc` from the bridge release. Download
+`discord-dcc-compat.inc` and `discord-connector.inc` from
+[omp-Discord-Bridge-compat](https://github.com/itsneufox/omp-Discord-Bridge-compat)
+into the same compiler include directory, replacing the old
+`discord-connector.inc`, and keep:
+
+```pawn
+#include <discord-connector>
+```
+
+You can also use `#include <discord-dcc-compat>` explicitly. Recompile your
+scripts and load the matching **Discord Bridge** binary instead of Discord
+Connector. Existing `.amx` files compiled against the original connector must
+be recompiled. Configure the bot as described below.
+
+The adapter covers DCC APIs with an existing bridge counterpart: names, tags,
+enums, gateway callbacks, embeds, moderation and commands. Async callbacks keep
+DCC's original argument order and `DCC_GetCreated*()` result getters. Slash
+commands retain their optional `arguments` text field. `DCC_On*` maps to the
+same public as `DBR_On*`; define each event only once per script.
+
+These APIs have no bridge counterpart and are deliberately omitted:
+`DCC_GetUserDiscriminator`, `DCC_GetInteractionMentionCount` and
+`DCC_GetInteractionMention`. Code using them needs updating; this is source
+compatibility for the supported subset, not full legacy binary compatibility.
+
 ### 2. Create the bot on Discord
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications)
@@ -544,7 +572,8 @@ Outputs in `build/windows-x86/`:
 
 - `plugins/Release/discord-bridge.dll`: the plugin, with OpenSSL built in, so it
   is the only file to copy (`components/` on open.mp, `plugins/` on SA-MP);
-- `pawno/include/discord-bridge.inc`: the include.
+- `pawno/include/discord-bridge.inc`: the primary include. Compatibility includes
+  are distributed separately in [omp-Discord-Bridge-compat](https://github.com/itsneufox/omp-Discord-Bridge-compat).
 
 Windows servers are 32-bit, so the preset always builds for Win32.
 
@@ -567,3 +596,8 @@ Set `-DDISCORD_BRIDGE_VERSION=X.Y.Z` on either platform to choose the version.
 
 AI tools assisted with parts of the code and documentation. Review the source
 and test the plugin on your own server before using it in production.
+
+## License
+
+Licensed under the [MIT License](LICENSE). Bundled third-party code retains its
+own licenses.

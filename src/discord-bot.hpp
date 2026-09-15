@@ -8,6 +8,7 @@
 #include "discord-interface.hpp"
 #include "discord-websocket.hpp"
 #include "discord-http.hpp"
+#include "discord-rest-queue.hpp"
 #include <memory>
 #include <atomic>
 #include <chrono>
@@ -46,10 +47,7 @@ private:
 
 	std::deque<std::string> gatewayEvents_;
 	mutable std::mutex gatewayEventsMutex_;
-	std::deque<std::function<void(DiscordHTTP&)>> restTasks_;
-	std::mutex restTasksMutex_;
-	std::condition_variable restTasksCondition_;
-	bool restQueueLimitLogged_ = false;
+	DiscordRestQueue restQueue_;
 	std::thread restThread_;
 	std::atomic<bool> restStop_ { false };
 	std::deque<std::function<void()>> completionTasks_;

@@ -1616,13 +1616,17 @@ cell AMX_NATIVE_CALL Native_SendDirectMessage(AMX* amx, cell* params)
 	}
 	DiscordJson body;
 	if (!takeBuilderPayload(params[2], false, body, "DBR_SendDirectMessage")) return 0;
-	return submitAction("DBR_SendDirectMessage", [userId, payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)](DiscordHTTP& rest)
+	return submitAction("DBR_SendDirectMessage", [userId, channelId = std::string(), payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)](DiscordHTTP& rest) mutable
 	{
-		const DiscordHTTP::Response channel = rest.createDM(userId);
-		if (!channel.success) return channel;
-		const DiscordJson data = DiscordJson::parse(channel.body, nullptr, false);
-		const std::string channelId = data.is_object() ? jsonString(data, "id") : std::string();
-		if (channelId.empty()) return DiscordHTTP::Response { 0, "Discord did not return a DM channel", false, {}, 0.0, false };
+		// Preserve the completed first step if sending is deferred by a bucket.
+		if (channelId.empty())
+		{
+			const DiscordHTTP::Response channel = rest.createDM(userId);
+			if (!channel.success) return channel;
+			const DiscordJson data = DiscordJson::parse(channel.body, nullptr, false);
+			channelId = data.is_object() ? jsonString(data, "id") : std::string();
+			if (channelId.empty()) return DiscordHTTP::Response { 0, "Discord did not return a DM channel", false, {}, 0.0, false };
+		}
 		return rest.sendMessagePayload(channelId, payload);
 	}, [callback](const DiscordHTTP::Response& response)
 	{
