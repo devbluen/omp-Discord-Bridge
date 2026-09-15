@@ -274,3 +274,12 @@ if(BUILD_TESTING)
 	add_test(NAME discord-bridge-rest COMMAND discord-bridge-rest-tests)
 	set_tests_properties(discord-bridge-rest PROPERTIES TIMEOUT 15)
 endif()
+
+if(BUILD_TESTING)
+	add_executable(discord-bridge-mentions-tests tests/mentions-tests.cpp)
+	target_include_directories(discord-bridge-mentions-tests PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/src
+		${CMAKE_CURRENT_SOURCE_DIR}/third_party
+	)
+	add_test(NAME discord-bridge-mentions COMMAND discord-bridge-mentions-tests)
+endif()

@@ -357,6 +357,8 @@ native DiscordUser:DBR_FindUserByName(const user_name[]);
 native DBR_FetchUser(DiscordUser:user, const callback[], const format[] = "", {Float, _}:...);
 native DBR_GetUserID(DiscordUser:user, dest[DISCORD_ID_SIZE], max_size = sizeof dest);
 native DBR_GetUserName(DiscordUser:user, dest[], max_size = sizeof dest);
+// Returns the cached discriminator string unchanged (including "0" when supplied).
+native DBR_GetUserDiscriminator(DiscordUser:user, dest[], max_size = sizeof dest);
 native DBR_GetUserGlobalName(DiscordUser:user, dest[], max_size = sizeof dest);
 native DBR_GetUserAvatarURL(DiscordUser:user, dest[], max_size = sizeof dest, size = 256);
 native DBR_GetUserBannerURL(DiscordUser:user, dest[], max_size = sizeof dest, size = 256);
@@ -658,6 +660,13 @@ native DBR_GetInteractionSubGroup(DiscordInteraction:interaction, dest[DISCORD_C
 native DBR_GetInteractionTargetID(DiscordInteraction:interaction, dest[DISCORD_ID_SIZE], max_size = sizeof dest);
 native bool:DBR_HasInteractionOption(DiscordInteraction:interaction, const name[]);
 native DiscordCommandOptionType:DBR_GetInteractionOptionType(DiscordInteraction:interaction, const name[]);
+// User mentions in string command options, including nested subcommands.
+// Accepts <@id> and <@!id>; preserves order and duplicates. Role/channel mentions
+// and typed user options are excluded. Valid interactions with no mentions count 0.
+native DBR_GetInteractionMentionCount(DiscordInteraction:interaction, &mentioned_user_count);
+// Zero-based offset. Returns a user handle even if that user is not cached.
+// Invalid/expired interactions, offsets or output references return 0.
+native DBR_GetInteractionMention(DiscordInteraction:interaction, offset, &DiscordUser:mentioned_user);
 native DBR_GetInteractionOptionString(DiscordInteraction:interaction, const name[], dest[], max_size = sizeof dest);
 native DBR_GetInteractionOptionInt(DiscordInteraction:interaction, const name[], &value);
 native DBR_GetInteractionOptionFloat(DiscordInteraction:interaction, const name[], &Float:value);

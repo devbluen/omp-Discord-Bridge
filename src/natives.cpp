@@ -1126,6 +1126,15 @@ cell AMX_NATIVE_CALL Native_GetUserName(AMX* amx, cell* params)
 	return setAmxString(amx, params[2], name, params[3]) ? 1 : 0;
 }
 
+cell AMX_NATIVE_CALL Native_GetUserDiscriminator(AMX* amx, cell* params)
+{
+	if (nativeParamCount(params) < 3) return 0;
+	DiscordUser* user = resolveUserByHandle(params[1]);
+	if (!user) return 0;
+	const auto discriminator = user->getDiscriminator();
+	return setAmxString(amx, params[2], std::string(discriminator.data(), discriminator.length()), params[3]) ? 1 : 0;
+}
+
 cell AMX_NATIVE_CALL Native_IsUserBot(AMX* amx, cell* params)
 {
 	DiscordUser* user = resolveUserByHandle(params[1]);
@@ -2251,6 +2260,7 @@ void appendCoreNatives(std::vector<AMX_NATIVE_INFO>& natives)
 		{ "DBR_FindUserByName", Native_FindUserByName },
 		{ "DBR_GetUserID", Native_GetUserId },
 		{ "DBR_GetUserName", Native_GetUserName },
+		{ "DBR_GetUserDiscriminator", Native_GetUserDiscriminator },
 		{ "DBR_IsUserBot", Native_IsUserBot },
 		{ "DBR_IsUserVerified", Native_IsUserVerified },
 
