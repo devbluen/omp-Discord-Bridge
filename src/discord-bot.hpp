@@ -89,6 +89,8 @@ public:
 	bool connect();
 	void stop();
 	void update();
+	bool sendChannelMessage(const std::string& channelId, const std::string& message,
+		std::function<void(const DiscordHTTP::Response&)> completion = {});
 	bool submitRestTask(std::function<void(DiscordHTTP&)> task);
 	void enqueueCompletion(std::function<void()> task);
 

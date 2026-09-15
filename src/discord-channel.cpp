@@ -29,10 +29,7 @@ bool DiscordChannel::sendMessage(StringView content)
 
 	const std::string channelId = channelId_;
 	const std::string message(content.data(), content.length());
-	return bot_->submitRestTask([channelId, message](DiscordHTTP& http)
-	{
-		http.sendMessage(channelId, message);
-	}) ? true : false;
+	return bot_->sendChannelMessage(channelId, message);
 }
 
 bool DiscordChannel::setName(StringView name)

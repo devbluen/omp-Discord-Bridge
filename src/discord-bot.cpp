@@ -369,6 +369,26 @@ void DiscordBot::update()
 	}
 }
 
+bool DiscordBot::sendChannelMessage(const std::string& channelId, const std::string& message,
+	std::function<void(const DiscordHTTP::Response&)> completion)
+{
+	if (shouldStop_ || restStop_ || !http_) return false;
+	const int interval = !completion && component_->batchRateLimitedMessages() ? component_->getMessageBatchInterval() : 0;
+	return restQueue_.pushMessage(channelId, message, interval,
+		[this, channelId, completion = std::move(completion)](const std::string& content, unsigned& retries, DiscordRateLimits::Time eligibleAt)
+	{
+		if (shouldStop_ || !http_) return;
+		http_->runTask([&](DiscordHTTP& http)
+		{
+			const auto response = http.sendMessage(channelId, content);
+			if (completion) completion(response);
+		}, retries, eligibleAt);
+	}, [this]()
+	{
+		DiscordLogWarning(core_, "[DiscordBridge] Discord REST queue limit reached; request dropped");
+	});
+}
+
 bool DiscordBot::submitRestTask(std::function<void(DiscordHTTP&)> task)
 {
 	if (!task || shouldStop_ || restStop_ || !http_) return false;

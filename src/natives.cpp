@@ -1026,15 +1026,15 @@ cell AMX_NATIVE_CALL Native_SendChannelMessage(AMX* amx, cell* params)
 	if (nativeParamCount(params) >= 4 && !capturePawnCallback(amx, params[3], params[4], params, 5, callback)) return 0;
 	DiscordBot* bot = nativeBot();
 	if (!bot) return 0;
-	return bot->submitRestTask([bot, channelId, message, callback](DiscordHTTP& http)
+	std::function<void(const DiscordHTTP::Response&)> completion;
+	if (callback) completion = [bot, callback](const DiscordHTTP::Response& response)
 	{
-		const auto response = http.sendMessage(channelId, message);
-		if (!callback) return;
 		bot->enqueueCompletion([response, callback]()
 		{
 			completeMessageResponse(response.success, response.body, callback);
 		});
-	}) ? 1 : 0;
+	};
+	return bot->sendChannelMessage(channelId, message, std::move(completion)) ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_SetChannelName(AMX* amx, cell* params)

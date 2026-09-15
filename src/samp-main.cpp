@@ -74,7 +74,11 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data)
 	const std::string token = firstValue("DISCORD_BOT_TOKEN", "discord_bot_token", "discord.bot_token");
 	const std::string channelId = firstValue("DISCORD_CHANNEL_ID", "discord_channel_id", "discord.channel_id");
 	const std::string channelName = firstValue("DISCORD_CHANNEL_NAME", "discord_channel_name", "discord.channel_name");
-	DiscordBridgeComponent::getInstance()->start(token, configuredIntents(), channelId, channelName);
+	const int batchInterval = DiscordMessageBatchConfig::interval(
+		firstValue("DISCORD_BATCH_INTERVAL_MS", "discord_batch_interval_ms", "discord.batch_interval_ms"));
+	const bool batchRateLimited = DiscordMessageBatchConfig::enabled(
+		firstValue("DISCORD_BATCH_RATE_LIMITED", "discord_batch_rate_limited", "discord.batch_rate_limited"));
+	DiscordBridgeComponent::getInstance()->start(token, configuredIntents(), channelId, channelName, batchInterval, batchRateLimited);
 
 	if (logprintf)
 	{

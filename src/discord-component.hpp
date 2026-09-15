@@ -7,6 +7,7 @@
 
 #include "discord-interface.hpp"
 #include "discord-bot.hpp"
+#include "discord-message-batch-config.hpp"
 #include "samp-pawn.hpp"
 #include <Server/Components/Pawn/pawn.hpp>
 #include <Impl/pool_impl.hpp>
@@ -53,6 +54,8 @@ private:
 	// priority over DBR_ConnectBot.
 	std::string configuredToken_;
 	int configuredIntents_ = DISCORD_DEFAULT_INTENTS;
+	int configuredBatchIntervalMs_ = DiscordMessageBatchConfig::DEFAULT_INTERVAL_MS;
+	bool configuredBatchRateLimited_ = false;
 	bool configurationLoaded_ = false;
 	// DBR_DisconnectBot can run inside a callback dispatched by the bot's own
 	// update().  Destroying the bot there would free the object that is still
@@ -111,7 +114,10 @@ public:
 
 	void onTick(Microseconds elapsed, TimePoint now) override;
 
-	bool start(StringView token, int intents, StringView channelId = {}, StringView channelName = {});
+	int getMessageBatchInterval() { loadConfiguration(); return configuredBatchIntervalMs_; }
+	bool batchRateLimitedMessages() { loadConfiguration(); return configuredBatchRateLimited_; }
+	bool start(StringView token, int intents, StringView channelId = {}, StringView channelName = {},
+		int batchIntervalMs = DiscordMessageBatchConfig::DEFAULT_INTERVAL_MS, bool batchRateLimited = false);
 
 	static DiscordBridgeComponent* getInstance();
 

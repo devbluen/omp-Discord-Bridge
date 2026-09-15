@@ -338,6 +338,8 @@ native DBR_GetChannelPosition(DiscordChannel:channel, &position);
 native DBR_IsChannelNsfw(DiscordChannel:channel, &bool:is_nsfw);
 native DBR_GetChannelParentCategory(DiscordChannel:channel, &DiscordChannel:category);
 native DBR_GetChannelSlowmode(DiscordChannel:channel, &seconds);
+// Optional discord_batch_rate_limited batches plain sends only when rate-limited.
+// Disabled by default; callback sends stay separate. See server configuration.
 native DBR_SendChannelMessage(DiscordChannel:channel, const message[], const callback[] = "", const format[] = "", {Float, _}:...);
 native DBR_SetChannelName(DiscordChannel:channel, const name[]);
 native DBR_SetChannelTopic(DiscordChannel:channel, const topic[]);
