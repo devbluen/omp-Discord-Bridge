@@ -160,7 +160,7 @@ bool sendInitialResponse(InteractionState& state, int callbackType, DiscordJson 
 {
 	DiscordJson body = { { "type", callbackType } };
 	if (!data.is_null()) body["data"] = std::move(data);
-	return submitAction(action, [id = state.id, token = state.token, payload = body.dump()](DiscordHTTP& rest)
+	return submitAction(action, [id = state.id, token = state.token, payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)](DiscordHTTP& rest)
 	{
 		return rest.createInteractionResponse(id, token, payload);
 	});
@@ -221,13 +221,13 @@ bool respondWithMessage(InteractionState& state, DiscordJson message, bool ephem
 				if (value == 0) message.erase("flags");
 				else message["flags"] = value;
 			}
-			if (!sendWebhookRequest(state, http::verb::patch, "/messages/@original", message.dump(), "DBR_RespondInteraction")) return false;
+			if (!sendWebhookRequest(state, http::verb::patch, "/messages/@original", message.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), "DBR_RespondInteraction")) return false;
 			state.response = ResponseState::Replied;
 			return true;
 		case ResponseState::DeferredUpdate:
 		case ResponseState::Replied:
-			if (ephemeral) message["flags"] = message.value("flags", 0) | MESSAGE_FLAG_EPHEMERAL;
-			return sendWebhookRequest(state, http::verb::post, "", message.dump(), "DBR_SendInteractionFollowup");
+			if (ephemeral) message["flags"] = jsonInt(message, "flags", 0) | MESSAGE_FLAG_EPHEMERAL;
+			return sendWebhookRequest(state, http::verb::post, "", message.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), "DBR_SendInteractionFollowup");
 		default:
 			return false;
 	}
@@ -300,7 +300,7 @@ bool deployCommands()
 	for (const std::string& scope : scopes)
 	{
 		const DiscordJson commands = g_commands.renderScope(scope);
-		const std::string body = commands.dump();
+		const std::string body = commands.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 		const auto pending = g_pendingScopes.find(scope);
 		if (pending != g_pendingScopes.end() && pending->second == body) continue;
 		const auto deployed = g_deployedScopes.find(scope);
@@ -313,7 +313,7 @@ bool deployCommands()
 		for (const auto& command : commands)
 		{
 			if (!names.empty()) names += ", ";
-			names += command.value("name", std::string());
+			names += jsonString(command, "name");
 		}
 		logInfo("[DiscordBridge] publishing " + std::to_string(count) + " application command(s) to the " + label +
 			(names.empty() ? std::string() : ": " + names));
@@ -363,7 +363,7 @@ void cacheResolvedEntities(InteractionState& state)
 	{
 		for (const auto& user : *users)
 		{
-			if (user.is_object()) bridge->upsertUserFromJson(user.dump());
+			if (user.is_object()) bridge->upsertUserFromJson(user.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 		}
 	}
 	DiscordGuild* guild = state.guildId.empty() ? nullptr : static_cast<DiscordGuild*>(bridge->findGuildById(state.guildId));
@@ -371,14 +371,14 @@ void cacheResolvedEntities(InteractionState& state)
 	{
 		for (auto it = members->begin(); it != members->end(); ++it)
 		{
-			if (it.value().is_object()) guild->updateMemberFromJson(it.value().dump(), it.key());
+			if (it.value().is_object()) guild->updateMemberFromJson(it.value().dump(-1, ' ', false, DiscordJson::error_handler_t::replace), it.key());
 		}
 	}
 	if (const DiscordJson* roles = section("roles"))
 	{
 		for (const auto& role : *roles)
 		{
-			if (role.is_object()) bridge->upsertRoleFromJson(role.dump(), state.guildId);
+			if (role.is_object()) bridge->upsertRoleFromJson(role.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), state.guildId);
 		}
 	}
 	if (const DiscordJson* messages = section("messages"))
@@ -386,7 +386,7 @@ void cacheResolvedEntities(InteractionState& state)
 		for (const auto& message : *messages)
 		{
 			if (!message.is_object()) continue;
-			if (DiscordMessage* cached = bridge->upsertMessageFromJson(message.dump()))
+			if (DiscordMessage* cached = bridge->upsertMessageFromJson(message.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)))
 			{
 				state.messageId.assign(cached->getMessageId().data(), cached->getMessageId().length());
 				rememberMessageChannel(assignMessageHandle(cached->getMessageId()), cached->getChannelId());
@@ -397,8 +397,8 @@ void cacheResolvedEntities(InteractionState& state)
 
 bool callCommandCallback(const InteractionState& state, cell handle, cell userHandle)
 {
-	const std::string name = state.data.value("name", std::string());
-	const int type = state.data.value("type", static_cast<int>(ChatInputCommand));
+	const std::string name = jsonString(state.data, "name");
+	const int type = jsonInt(state.data, "type", static_cast<int>(ChatInputCommand));
 	Handle command = g_commands.findCommand(name, type, state.guildId);
 	if (!command) command = g_commands.findCommand(name, type, std::string());
 	const Command* registered = g_commands.getCommand(command);
@@ -426,7 +426,7 @@ bool callRegisteredHandler(int type, const std::string& key, cell handle, cell u
 	if (!best) return false;
 	const std::string callback = best->callback;
 	cell result = 1;
-	return callPawnPublicOnScript(pawnScriptForId(best->scriptId), callback.c_str(), result, handle, userHandle, StringView(key));
+	return callPawnPublicOnScript(pawnScriptForId(best->scriptId), callback.c_str(), result, handle, userHandle, StringView(toPawnText(key)));
 }
 
 void dispatchInteraction(const std::string& json)
@@ -436,9 +436,9 @@ void dispatchInteraction(const std::string& json)
 	if (!bridge || payload.is_discarded() || !payload.is_object()) return;
 
 	InteractionState state;
-	state.id = payload.value("id", std::string());
-	state.token = payload.value("token", std::string());
-	state.type = payload.value("type", 0);
+	state.id = jsonString(payload, "id");
+	state.token = jsonString(payload, "token");
+	state.type = jsonInt(payload, "type", 0);
 	state.receivedAt = Clock::now();
 	if (state.id.empty() || state.token.empty()) return;
 	if (state.type == PingInteraction)
@@ -449,7 +449,7 @@ void dispatchInteraction(const std::string& json)
 	if (state.type < CommandInteraction || state.type > ModalSubmitInteraction) return;
 
 	if (auto data = payload.find("data"); data != payload.end() && data->is_object()) state.data = *data;
-	state.channelId = payload.value("channel_id", std::string());
+	state.channelId = jsonString(payload, "channel_id");
 	if (auto guild = payload.find("guild_id"); guild != payload.end() && guild->is_string()) state.guildId = guild->get<std::string>();
 	if (auto locale = payload.find("locale"); locale != payload.end() && locale->is_string()) state.locale = locale->get<std::string>();
 
@@ -459,7 +459,7 @@ void dispatchInteraction(const std::string& json)
 	if (hasMember && memberIt->find("user") != memberIt->end()) userJson = (*memberIt)["user"];
 	else if (auto user = payload.find("user"); user != payload.end()) userJson = *user;
 
-	DiscordUser* user = userJson.is_object() ? bridge->upsertUserFromJson(userJson.dump()) : nullptr;
+	DiscordUser* user = userJson.is_object() ? bridge->upsertUserFromJson(userJson.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)) : nullptr;
 	if (user) state.userId.assign(user->getUserId().data(), user->getUserId().length());
 	if (hasMember)
 	{
@@ -489,9 +489,9 @@ void dispatchInteraction(const std::string& json)
 	}
 	const cell handle = g_nextInteraction++;
 	const int type = state.type;
-	const std::string commandName = state.data.value("name", std::string());
-	const std::string customId = state.data.value("custom_id", std::string());
-	const int componentType = state.data.value("component_type", 0);
+	const std::string commandName = jsonString(state.data, "name");
+	const std::string customId = jsonString(state.data, "custom_id");
+	const int componentType = jsonInt(state.data, "component_type", 0);
 	std::string focusedOption;
 	if (type == AutocompleteInteraction)
 	{
@@ -511,17 +511,17 @@ void dispatchInteraction(const std::string& json)
 		switch (type)
 		{
 			case CommandInteraction:
-				callPawnPublic("DBR_OnCommand", 1, handle, userHandle, StringView(commandName));
+				callPawnPublic("DBR_OnCommand", 1, handle, userHandle, StringView(toPawnText(commandName)));
 				break;
 			case ComponentInteraction:
-				if (componentType == Button) callPawnPublic("DBR_OnButton", 1, handle, userHandle, StringView(customId));
-				else callPawnPublic("DBR_OnSelectMenu", 1, handle, userHandle, StringView(customId));
+				if (componentType == Button) callPawnPublic("DBR_OnButton", 1, handle, userHandle, StringView(toPawnText(customId)));
+				else callPawnPublic("DBR_OnSelectMenu", 1, handle, userHandle, StringView(toPawnText(customId)));
 				break;
 			case AutocompleteInteraction:
-				callPawnPublic("DBR_OnAutocomplete", 1, handle, userHandle, StringView(commandName), StringView(focusedOption));
+				callPawnPublic("DBR_OnAutocomplete", 1, handle, userHandle, StringView(toPawnText(commandName)), StringView(toPawnText(focusedOption)));
 				break;
 			case ModalSubmitInteraction:
-				callPawnPublic("DBR_OnModalSubmit", 1, handle, userHandle, StringView(customId));
+				callPawnPublic("DBR_OnModalSubmit", 1, handle, userHandle, StringView(toPawnText(customId)));
 				break;
 			default:
 				break;
@@ -590,14 +590,14 @@ cell AMX_NATIVE_CALL Native_GetInteractionCommandName(AMX* amx, cell* params)
 {
 	const InteractionState* state = interactionFor(params[1]);
 	if (!state || (state->type != CommandInteraction && state->type != AutocompleteInteraction)) return 0;
-	return hasParams(params, 3) ? writeString(amx, params[2], params[3], state->data.value("name", std::string())) : 0;
+	return hasParams(params, 3) ? writeString(amx, params[2], params[3], jsonString(state->data, "name")) : 0;
 }
 
 cell AMX_NATIVE_CALL Native_GetInteractionCommandType(AMX*, cell* params)
 {
 	const InteractionState* state = interactionFor(params[1]);
 	if (!state || (state->type != CommandInteraction && state->type != AutocompleteInteraction)) return 0;
-	return static_cast<cell>(state->data.value("type", static_cast<int>(ChatInputCommand)));
+	return static_cast<cell>(jsonInt(state->data, "type", static_cast<int>(ChatInputCommand)));
 }
 
 cell AMX_NATIVE_CALL Native_GetInteractionSubcommand(AMX* amx, cell* params)
@@ -618,7 +618,7 @@ cell AMX_NATIVE_CALL Native_GetInteractionTargetId(AMX* amx, cell* params)
 {
 	const InteractionState* state = interactionFor(params[1]);
 	if (!state || !hasParams(params, 3)) return 0;
-	const std::string target = state->data.value("target_id", std::string());
+	const std::string target = jsonString(state->data, "target_id");
 	if (target.empty()) return 0;
 	return writeString(amx, params[2], params[3], target);
 }
@@ -627,13 +627,13 @@ cell AMX_NATIVE_CALL Native_GetInteractionCustomId(AMX* amx, cell* params)
 {
 	const InteractionState* state = interactionFor(params[1]);
 	if (!state || !hasParams(params, 3)) return 0;
-	return writeString(amx, params[2], params[3], state->data.value("custom_id", std::string()));
+	return writeString(amx, params[2], params[3], jsonString(state->data, "custom_id"));
 }
 
 cell AMX_NATIVE_CALL Native_GetInteractionComponentType(AMX*, cell* params)
 {
 	const InteractionState* state = interactionFor(params[1]);
-	return state && state->type == ComponentInteraction ? static_cast<cell>(state->data.value("component_type", 0)) : 0;
+	return state && state->type == ComponentInteraction ? static_cast<cell>(jsonInt(state->data, "component_type", 0)) : 0;
 }
 
 cell AMX_NATIVE_CALL Native_GetInteractionValueCount(AMX* amx, cell* params)
@@ -786,7 +786,7 @@ cell AMX_NATIVE_CALL Native_HasInteractionPermission(AMX*, cell* params)
 cell AMX_NATIVE_CALL Native_GetInteractionData(AMX* amx, cell* params)
 {
 	const InteractionState* state = interactionFor(params[1]);
-	return state && hasParams(params, 3) ? writeString(amx, params[2], params[3], state->data.dump()) : 0;
+	return state && hasParams(params, 3) ? writeString(amx, params[2], params[3], state->data.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)) : 0;
 }
 
 cell AMX_NATIVE_CALL Native_IsInteractionResponded(AMX*, cell* params)
@@ -869,7 +869,7 @@ cell AMX_NATIVE_CALL Native_UpdateInteractionMessage(AMX*, cell* params)
 		return 1;
 	}
 	if (state->response != ResponseState::DeferredUpdate) return 0;
-	return sendWebhookRequest(*state, http::verb::patch, "/messages/@original", body.dump(), "DBR_UpdateInteractionMessage") ? 1 : 0;
+	return sendWebhookRequest(*state, http::verb::patch, "/messages/@original", body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), "DBR_UpdateInteractionMessage") ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_EditInteractionResponse(AMX*, cell* params)
@@ -880,7 +880,7 @@ cell AMX_NATIVE_CALL Native_EditInteractionResponse(AMX*, cell* params)
 	if (!takeBuilderPayload(params[2], false, body, "DBR_EditInteractionResponse")) return 0;
 	if (state->response == ResponseState::None || state->response == ResponseState::Modal ||
 		state->response == ResponseState::Autocomplete) return 0;
-	return sendWebhookRequest(*state, http::verb::patch, "/messages/@original", body.dump(), "DBR_EditInteractionResponse") ? 1 : 0;
+	return sendWebhookRequest(*state, http::verb::patch, "/messages/@original", body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), "DBR_EditInteractionResponse") ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_DeleteInteractionResponse(AMX*, cell* params)
@@ -899,7 +899,7 @@ cell AMX_NATIVE_CALL Native_SendInteractionFollowup(AMX*, cell* params)
 	if (!takeBuilderPayload(params[2], params[3] != 0, body, "DBR_SendInteractionFollowup")) return 0;
 	if (state->response == ResponseState::None || state->response == ResponseState::Modal ||
 		state->response == ResponseState::Autocomplete) return 0;
-	return sendWebhookRequest(*state, http::verb::post, "", body.dump(), "DBR_SendInteractionFollowup") ? 1 : 0;
+	return sendWebhookRequest(*state, http::verb::post, "", body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), "DBR_SendInteractionFollowup") ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_ShowModal(AMX*, cell* params)
@@ -1595,7 +1595,7 @@ cell AMX_NATIVE_CALL Native_SendMessageBuilder(AMX* amx, cell* params)
 	}
 	DiscordJson body;
 	if (!takeBuilderPayload(params[2], false, body, "DBR_SendMessage")) return 0;
-	return submitAction("DBR_SendMessage", [channelId, payload = body.dump()](DiscordHTTP& rest)
+	return submitAction("DBR_SendMessage", [channelId, payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)](DiscordHTTP& rest)
 	{
 		return rest.sendMessagePayload(channelId, payload);
 	}, [callback](const DiscordHTTP::Response& response)
@@ -1616,12 +1616,12 @@ cell AMX_NATIVE_CALL Native_SendDirectMessage(AMX* amx, cell* params)
 	}
 	DiscordJson body;
 	if (!takeBuilderPayload(params[2], false, body, "DBR_SendDirectMessage")) return 0;
-	return submitAction("DBR_SendDirectMessage", [userId, payload = body.dump()](DiscordHTTP& rest)
+	return submitAction("DBR_SendDirectMessage", [userId, payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)](DiscordHTTP& rest)
 	{
 		const DiscordHTTP::Response channel = rest.createDM(userId);
 		if (!channel.success) return channel;
 		const DiscordJson data = DiscordJson::parse(channel.body, nullptr, false);
-		const std::string channelId = data.is_object() ? data.value("id", std::string()) : std::string();
+		const std::string channelId = data.is_object() ? jsonString(data, "id") : std::string();
 		if (channelId.empty()) return DiscordHTTP::Response { 0, "Discord did not return a DM channel", false, {}, 0.0, false };
 		return rest.sendMessagePayload(channelId, payload);
 	}, [callback](const DiscordHTTP::Response& response)
@@ -1642,7 +1642,7 @@ cell AMX_NATIVE_CALL Native_EditMessageWithBuilder(AMX*, cell* params)
 	}
 	DiscordJson body;
 	if (!takeBuilderPayload(params[2], false, body, "DBR_EditMessageWithBuilder")) return 0;
-	return submitAction("DBR_EditMessageWithBuilder", [channelId, messageId, payload = body.dump()](DiscordHTTP& rest)
+	return submitAction("DBR_EditMessageWithBuilder", [channelId, messageId, payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)](DiscordHTTP& rest)
 	{
 		return rest.editMessagePayload(channelId, messageId, payload);
 	}) ? 1 : 0;

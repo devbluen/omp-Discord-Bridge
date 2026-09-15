@@ -58,6 +58,12 @@ private:
 	// update().  Destroying the bot there would free the object that is still
 	// running, so in that case the disconnect waits until update() returns.
 	bool insideBotUpdate_ = false;
+	// Scripts loaded after the bot became ready (SA-MP loads the gamemode after
+	// the plugin connects; filterscripts can be reloaded any time) still get
+	// DBR_OnReady, on the next tick so their init callbacks run first.
+	std::vector<int> scriptsAwaitingReady_;
+	void queueReadyForScript(IPawnScript* script);
+	void deliverReadyToLateScripts();
 	bool disconnectRequested_ = false;
 	bool reconnectRequested_ = false;
 	std::string reconnectToken_;

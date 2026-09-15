@@ -166,7 +166,25 @@ bool DiscordBot::connect()
 	memberSyncRetryAt_.clear();
 	initialGuildSync_ = false;
 	readyEventSent_ = false;
-	connectThread_ = std::thread([this]() { initializeConnection(); });
+	connectThread_ = std::thread([this]()
+	{
+		try
+		{
+			initializeConnection();
+		}
+		catch (const std::exception& exception)
+		{
+			DiscordLogWarning(core_, std::string("[DiscordBridge] Discord connection failed: ") + exception.what());
+			connected_ = false;
+			connecting_ = false;
+		}
+		catch (...)
+		{
+			DiscordLogWarning(core_, "[DiscordBridge] Discord connection failed with an unknown exception");
+			connected_ = false;
+			connecting_ = false;
+		}
+	});
 	return true;
 }
 
@@ -287,7 +305,21 @@ void DiscordBot::update()
 			task = std::move(completionTasks_.front());
 			completionTasks_.pop_front();
 		}
-		if (!shouldStop_ && task) task();
+		if (!shouldStop_ && task)
+		{
+			try
+			{
+				task();
+			}
+			catch (const std::exception& exception)
+			{
+				DiscordLogWarning(core_, std::string("[DiscordBridge] Discord request completion failed: ") + exception.what());
+			}
+			catch (...)
+			{
+				DiscordLogWarning(core_, "[DiscordBridge] Discord request completion failed with an unknown exception");
+			}
+		}
 		if (std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(4)) break;
 	}
 
@@ -319,7 +351,22 @@ void DiscordBot::update()
 			payload = std::move(gatewayEvents_.front());
 			gatewayEvents_.pop_front();
 		}
-		if (!shouldStop_) handleGatewayMessage(payload);
+		if (!shouldStop_)
+		{
+			// One malformed or unexpected event must not stop the others.
+			try
+			{
+				handleGatewayMessage(payload);
+			}
+			catch (const std::exception& exception)
+			{
+				DiscordLogWarning(core_, std::string("[DiscordBridge] Discord gateway event failed: ") + exception.what());
+			}
+			catch (...)
+			{
+				DiscordLogWarning(core_, "[DiscordBridge] Discord gateway event failed with an unknown exception");
+			}
+		}
 		if (processed > 0 && std::chrono::steady_clock::now() - started >= MAX_TICK_BUDGET) break;
 	}
 }
@@ -454,16 +501,16 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 {
 	const DiscordJson envelope = DiscordJson::parse(payload, nullptr, false);
 	if (envelope.is_discarded() || !envelope.is_object()) return;
-	const int op = envelope.value("op", -1);
+	const int op = jsonInt(envelope, "op", -1);
 	if (op != 0 || !(envelope.find("t") != envelope.end()) || !envelope["t"].is_string()) return;
 	const std::string event = envelope["t"].get<std::string>();
 	const DiscordJson data = envelope.value("d", DiscordJson::object());
 	if (!data.is_object() && !data.is_array()) return;
 	if (event == "RATE_LIMITED")
 	{
-		if (data.value("opcode", -1) == 8 && data.find("meta") != data.end() && data["meta"].is_object())
+		if (jsonInt(data, "opcode", -1) == 8 && data.find("meta") != data.end() && data["meta"].is_object())
 		{
-			const std::string guildId = data["meta"].value("guild_id", std::string());
+			const std::string guildId = jsonString(data["meta"], "guild_id");
 			if (!guildId.empty())
 			{
 				const double retryAfter = std::max(1.0, data.value("retry_after", 30.0));
@@ -479,7 +526,7 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 	{
 		if ((data.find("user") != data.end()) && data["user"].is_object())
 		{
-			const std::string userJson = data["user"].dump();
+			const std::string userJson = data["user"].dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 			component_->upsertUserFromJson(userJson);
 			setBotInfo(DiscordUtils::extractJsonString(userJson, "id"), DiscordUtils::extractJsonString(userJson, "username"));
 		}
@@ -492,7 +539,7 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 		{
 			for (const auto& channel : data["private_channels"])
 			{
-				if (channel.is_object()) component_->upsertChannelFromJson(channel.dump());
+				if (channel.is_object()) component_->upsertChannelFromJson(channel.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 			}
 		}
 		initialGuildIds_.clear();
@@ -521,18 +568,18 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 	}
 	if (event == "INTERACTION_CREATE")
 	{
-		HandleDiscordInteractionPayload(data.dump());
+		HandleDiscordInteractionPayload(data.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 		return;
 	}
 
 	if (event == "GUILD_CREATE" || event == "GUILD_UPDATE")
 	{
-		const std::string guildId = data.value("id", std::string());
+		const std::string guildId = jsonString(data, "id");
 		const bool wasCached = !guildId.empty() && component_->findGuildById(guildId) != nullptr;
 		if (event == "GUILD_UPDATE" && !wasCached) return;
 		const bool hasInlineMembers = data.find("members") != data.end() && data["members"].is_array();
 		const bool useInlineMembers = hasInlineMembers && data["members"].size() <= 100;
-		DiscordGuild* guild = component_->upsertGuildFromJson(data.dump(), useInlineMembers);
+		DiscordGuild* guild = component_->upsertGuildFromJson(data.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), useInlineMembers);
 		if (guild)
 		{
 			if (event == "GUILD_CREATE")
@@ -557,8 +604,8 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 	}
 	if (event == "GUILD_DELETE")
 	{
-		const std::string guildId = data.value("id", std::string());
-		if (data.value("unavailable", false)) return;
+		const std::string guildId = jsonString(data, "id");
+		if (jsonBool(data, "unavailable", false)) return;
 		DiscordGuild* guild = static_cast<DiscordGuild*>(component_->findGuildById(guildId));
 		if (!guild) return;
 		component_->onGuildDeleteEvent(guildId);
@@ -577,11 +624,11 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 
 	if (event == "CHANNEL_CREATE" || event == "CHANNEL_UPDATE" || event == "THREAD_CREATE" || event == "THREAD_UPDATE")
 	{
-		const std::string channelId = data.value("id", std::string());
+		const std::string channelId = jsonString(data, "id");
 		const bool wasCached = !channelId.empty() && component_->findChannelById(channelId) != nullptr;
 		const bool isCreate = event == "CHANNEL_CREATE" || event == "THREAD_CREATE";
 		if (!isCreate && !wasCached) return;
-		DiscordChannel* channel = component_->upsertChannelFromJson(data.dump());
+		DiscordChannel* channel = component_->upsertChannelFromJson(data.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 		if (channel)
 		{
 			if (isCreate && !wasCached) component_->onChannelCreateEvent(*channel);
@@ -591,7 +638,7 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 	}
 	if (event == "CHANNEL_DELETE" || event == "THREAD_DELETE")
 	{
-		const std::string id = data.value("id", std::string());
+		const std::string id = jsonString(data, "id");
 		DiscordChannel* channel = static_cast<DiscordChannel*>(component_->findChannelById(id));
 		if (channel) component_->onChannelDeleteEvent(*channel);
 		component_->removeChannel(id);
@@ -600,26 +647,26 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 
 	if (event == "USER_UPDATE")
 	{
-		if (auto* user = component_->upsertUserFromJson(data.dump())) component_->onUserUpdateEvent(*user);
+		if (auto* user = component_->upsertUserFromJson(data.dump(-1, ' ', false, DiscordJson::error_handler_t::replace))) component_->onUserUpdateEvent(*user);
 		return;
 	}
 
 	if (event == "GUILD_MEMBER_ADD" || event == "GUILD_MEMBER_UPDATE")
 	{
-		const std::string guildId = data.value("guild_id", std::string());
+		const std::string guildId = jsonString(data, "guild_id");
 		DiscordGuild* guild = findOrCreateGuild(component_, guildId);
 		DiscordUser* user = nullptr;
 		if ((data.find("user") != data.end()) && data["user"].is_object())
 		{
-			const std::string memberUserId = data["user"].value("id", std::string());
-			if (event == "GUILD_MEMBER_ADD") user = component_->upsertUserFromJson(data["user"].dump());
+			const std::string memberUserId = jsonString(data["user"], "id");
+			if (event == "GUILD_MEMBER_ADD") user = component_->upsertUserFromJson(data["user"].dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 			else if (!memberUserId.empty()) user = static_cast<DiscordUser*>(component_->findUserById(memberUserId));
 		}
-		const std::string userId = (data.find("user") != data.end()) && data["user"].is_object() ? data["user"].value("id", std::string()) : std::string();
-		if (guild && (event == "GUILD_MEMBER_ADD" || guild->findMember(userId))) guild->updateMemberFromJson(data.dump(), userId);
+		const std::string userId = (data.find("user") != data.end()) && data["user"].is_object() ? jsonString(data["user"], "id") : std::string();
+		if (guild && (event == "GUILD_MEMBER_ADD" || guild->findMember(userId))) guild->updateMemberFromJson(data.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), userId);
 		if (guild && user)
 		{
-			if (event == "GUILD_MEMBER_UPDATE" && data["user"].is_object()) user->updateFromJson(data["user"].dump());
+			if (event == "GUILD_MEMBER_UPDATE" && data["user"].is_object()) user->updateFromJson(data["user"].dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 			if (event == "GUILD_MEMBER_ADD") component_->onGuildMemberAddEvent(*guild, *user);
 			else component_->onGuildMemberUpdateEvent(*guild, *user);
 		}
@@ -627,11 +674,11 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 	}
 	if (event == "GUILD_MEMBER_REMOVE")
 	{
-		const std::string guildId = data.value("guild_id", std::string());
-		std::string userId = data.value("user_id", std::string());
+		const std::string guildId = jsonString(data, "guild_id");
+		std::string userId = jsonString(data, "user_id");
 		if (userId.empty() && (data.find("user") != data.end()) && data["user"].is_object())
 		{
-			userId = data["user"].value("id", std::string());
+			userId = jsonString(data["user"], "id");
 		}
 		DiscordGuild* guild = findOrCreateGuild(component_, guildId);
 		DiscordUser* user = static_cast<DiscordUser*>(component_->findUserById(userId));
@@ -641,13 +688,13 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 	}
 	if (event == "VOICE_STATE_UPDATE")
 	{
-		const std::string guildId = data.value("guild_id", std::string());
-		const std::string userId = data.value("user_id", std::string());
+		const std::string guildId = jsonString(data, "guild_id");
+		const std::string userId = jsonString(data, "user_id");
 		DiscordGuild* guild = findOrCreateGuild(component_, guildId);
 		DiscordUser* user = static_cast<DiscordUser*>(component_->findUserById(userId));
-		if (guild && guild->findMember(userId)) guild->updateMemberFromJson(data.dump(), userId);
+		if (guild && guild->findMember(userId)) guild->updateMemberFromJson(data.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), userId);
 		DiscordChannel* channel = nullptr;
-		const std::string channelId = data.value("channel_id", std::string());
+		const std::string channelId = jsonString(data, "channel_id");
 		if (!channelId.empty()) channel = static_cast<DiscordChannel*>(component_->findChannelById(channelId));
 		if (!channelId.empty() && !channel) return;
 		if (guild && user) component_->onGuildMemberVoiceUpdateEvent(*guild, *user, channel);
@@ -655,31 +702,31 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 	}
 	if (event == "PRESENCE_UPDATE")
 	{
-		const std::string guildId = data.value("guild_id", std::string());
-		const std::string userId = (data.find("user") != data.end()) && data["user"].is_object() ? data["user"].value("id", std::string()) : data.value("user_id", std::string());
+		const std::string guildId = jsonString(data, "guild_id");
+		const std::string userId = (data.find("user") != data.end()) && data["user"].is_object() ? jsonString(data["user"], "id") : jsonString(data, "user_id");
 		DiscordGuild* guild = findOrCreateGuild(component_, guildId);
 		DiscordUser* user = nullptr;
 		if ((data.find("user") != data.end()) && data["user"].is_object())
 		{
-			const std::string presenceUserId = data["user"].value("id", std::string());
+			const std::string presenceUserId = jsonString(data["user"], "id");
 			if (!presenceUserId.empty()) user = static_cast<DiscordUser*>(component_->findUserById(presenceUserId));
 		}
 		if (!user && !userId.empty()) user = static_cast<DiscordUser*>(component_->findUserById(userId));
-		DiscordJson member = { { "user_id", userId }, { "presence", { { "status", data.value("status", "offline") } } } };
-		if (guild && guild->findMember(userId)) guild->updateMemberFromJson(member.dump(), userId);
+		DiscordJson member = { { "user_id", userId }, { "presence", { { "status", jsonString(data, "status", "offline") } } } };
+		if (guild && guild->findMember(userId)) guild->updateMemberFromJson(member.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), userId);
 		if (guild && user) component_->onGuildMemberUpdateEvent(*guild, *user);
 		return;
 	}
 
 	if (event == "GUILD_ROLE_CREATE" || event == "GUILD_ROLE_UPDATE")
 	{
-		const std::string guildId = data.value("guild_id", std::string());
+		const std::string guildId = jsonString(data, "guild_id");
 		DiscordGuild* guild = findOrCreateGuild(component_, guildId);
 		const DiscordJson roleData = data.value("role", data);
-		const std::string roleId = roleData.value("id", std::string());
+		const std::string roleId = jsonString(roleData, "id");
 		const bool wasCached = !roleId.empty() && component_->findRoleByIdInternal(roleId) != nullptr;
 		if (event == "GUILD_ROLE_UPDATE" && !wasCached) return;
-		DiscordRole* role = component_->upsertRoleFromJson(roleData.dump(), guildId);
+		DiscordRole* role = component_->upsertRoleFromJson(roleData.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), guildId);
 		if (guild && role)
 		{
 			if (event == "GUILD_ROLE_CREATE" && !wasCached) component_->onGuildRoleCreateEvent(*guild, *role);
@@ -689,8 +736,8 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 	}
 	if (event == "GUILD_ROLE_DELETE")
 	{
-		const std::string guildId = data.value("guild_id", std::string());
-		const std::string roleId = data.value("role_id", std::string());
+		const std::string guildId = jsonString(data, "guild_id");
+		const std::string roleId = jsonString(data, "role_id");
 		DiscordGuild* guild = findOrCreateGuild(component_, guildId);
 		DiscordRole* role = static_cast<DiscordRole*>(component_->findRoleByIdInternal(roleId));
 		if (guild && role) component_->onGuildRoleDeleteEvent(*guild, *role);
@@ -700,7 +747,7 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 
 	if (event == "MESSAGE_CREATE" || event == "MESSAGE_UPDATE")
 	{
-		if (auto* message = component_->upsertMessageFromJson(data.dump()))
+		if (auto* message = component_->upsertMessageFromJson(data.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)))
 		{
 			const std::string messageId(message->getMessageId().data(), message->getMessageId().length());
 			if (event == "MESSAGE_CREATE")
@@ -719,7 +766,7 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 	{
 		if (event == "MESSAGE_DELETE")
 		{
-			const std::string id = data.value("id", std::string());
+			const std::string id = jsonString(data, "id");
 			if (auto* message = static_cast<DiscordMessage*>(component_->findMessageById(id))) component_->onMessageDeleteEvent(*message);
 			component_->removeMessage(id);
 		}
@@ -738,19 +785,19 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 
 	if (event == "MESSAGE_REACTION_ADD" || event == "MESSAGE_REACTION_REMOVE" || event == "MESSAGE_REACTION_REMOVE_ALL" || event == "MESSAGE_REACTION_REMOVE_EMOJI")
 	{
-		const std::string messageId = data.value("message_id", std::string());
+		const std::string messageId = jsonString(data, "message_id");
 		DiscordMessage* message = static_cast<DiscordMessage*>(component_->findMessageById(messageId));
 		if (!message) return;
 		DiscordUser* user = nullptr;
-		const std::string userId = data.value("user_id", std::string());
+		const std::string userId = jsonString(data, "user_id");
 		if (!userId.empty()) user = static_cast<DiscordUser*>(component_->findUserById(userId));
 		if ((event == "MESSAGE_REACTION_ADD" || event == "MESSAGE_REACTION_REMOVE") && !user) return;
 		cell emoji = 0;
 		std::string emojiToken;
 		if ((data.find("emoji") != data.end()) && data["emoji"].is_object())
 		{
-			const std::string name = data["emoji"].value("name", std::string());
-			const std::string id = data["emoji"].value("id", std::string());
+			const std::string name = jsonString(data["emoji"], "name");
+			const std::string id = jsonString(data["emoji"], "id");
 			if (!name.empty())
 			{
 				emojiToken = name;
@@ -777,8 +824,8 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 			{
 				const auto& member = data["members"][index];
 				if (!member.is_object()) continue;
-				guild->updateMemberFromJson(member.dump());
-				if ((member.find("user") != member.end()) && member["user"].is_object()) component_->upsertUserFromJson(member["user"].dump());
+				guild->updateMemberFromJson(member.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
+				if ((member.find("user") != member.end()) && member["user"].is_object()) component_->upsertUserFromJson(member["user"].dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 			}
 			if (processed < memberCount)
 			{
@@ -790,7 +837,7 @@ void DiscordBot::handleGatewayMessage(const std::string& payload)
 					{ "op", 0 },
 					{ "t", "GUILD_MEMBERS_CHUNK" },
 					{ "d", std::move(nextData) }
-				}).dump());
+				}).dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 			}
 		}
 	}

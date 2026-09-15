@@ -129,7 +129,7 @@ void DiscordGuild::updateFromJson(const std::string& json, bool includeMembers)
 		{
 			if (member.is_object())
 			{
-				updateMemberFromJson(member.dump());
+				updateMemberFromJson(member.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 			}
 		}
 	}
@@ -138,8 +138,8 @@ void DiscordGuild::updateFromJson(const std::string& json, bool includeMembers)
 		for (const auto& voiceState : data["voice_states"])
 		{
 			if (!voiceState.is_object()) continue;
-			const std::string userId = voiceState.value("user_id", std::string());
-			if (!userId.empty()) updateMemberFromJson(voiceState.dump(), userId);
+			const std::string userId = jsonString(voiceState, "user_id");
+			if (!userId.empty()) updateMemberFromJson(voiceState.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), userId);
 		}
 	}
 	if ((data.find("presences") != data.end()) && data["presences"].is_array())
@@ -148,13 +148,13 @@ void DiscordGuild::updateFromJson(const std::string& json, bool includeMembers)
 		{
 			if (!presence.is_object()) continue;
 			const DiscordJson user = presence.value("user", DiscordJson::object());
-			const std::string userId = user.is_object() ? user.value("id", std::string()) : std::string();
+			const std::string userId = user.is_object() ? jsonString(user, "id") : std::string();
 			if (userId.empty()) continue;
 			DiscordJson member = {
 				{ "user_id", userId },
-				{ "presence", { { "status", presence.value("status", "offline") } } }
+				{ "presence", { { "status", jsonString(presence, "status", "offline") } } }
 			};
-			updateMemberFromJson(member.dump(), userId);
+			updateMemberFromJson(member.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), userId);
 		}
 	}
 }

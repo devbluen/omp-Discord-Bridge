@@ -7,6 +7,7 @@
 #include "samp-amx.hpp"
 #include "samp-config.hpp"
 #include "discord-component.hpp"
+#include "discord-log.hpp"
 #include "version.hpp"
 #include <cstdlib>
 
@@ -68,6 +69,7 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data)
 
 	SampAmx::setFunctionTable(data[PLUGIN_DATA_AMX_EXPORTS]);
 	logprintf = reinterpret_cast<logprintf_t>(data[PLUGIN_DATA_LOGPRINTF]);
+	DiscordLogSetMainThread();
 
 	const std::string token = firstValue("DISCORD_BOT_TOKEN", "discord_bot_token", "discord.bot_token");
 	const std::string channelId = firstValue("DISCORD_CHANNEL_ID", "discord_channel_id", "discord.channel_id");
@@ -79,7 +81,7 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data)
 		logprintf("[DiscordBridge] discord-bridge v%s loaded as SA-MP plugin", DISCORD_BRIDGE_VERSION);
 		if (token.empty())
 		{
-			logprintf("[DiscordBridge] No bot token configured; use DISCORD_BOT_TOKEN or discord_bot_token in server.cfg");
+			logprintf("[DiscordBridge] No token in DISCORD_BOT_TOKEN or server.cfg; call DBR_ConnectBot in the gamemode to connect");
 		}
 	}
 	return true;

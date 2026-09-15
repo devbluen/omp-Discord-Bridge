@@ -139,7 +139,7 @@ bool loadImageDataUri(const std::string& source, std::string& dataUri, std::stri
 
 DiscordHTTP::Response localFailure(const std::string& message)
 {
-	return DiscordHTTP::Response { 0, DiscordJson { { "message", message } }.dump(), false, {}, 0.0, false };
+	return DiscordHTTP::Response { 0, DiscordJson { { "message", message } }.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), false, {}, 0.0, false };
 }
 
 DiscordGuild::Member* memberFor(cell guildHandle, cell userHandle)
@@ -312,7 +312,7 @@ cell AMX_NATIVE_CALL Native_SetChannelSlowmode(AMX*, cell* params)
 {
 	const std::string channelId = hasParams(params, 2) ? channelIdForHandle(params[1]) : std::string();
 	if (channelId.empty() || params[2] < 0 || params[2] > 21600) return 0;
-	const std::string body = DiscordJson { { "rate_limit_per_user", params[2] } }.dump();
+	const std::string body = DiscordJson { { "rate_limit_per_user", params[2] } }.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 	return submitAction("DBR_SetChannelSlowmode", [channelId, body](DiscordHTTP& rest)
 	{
 		return rest.modifyChannel(channelId, body);
@@ -434,7 +434,7 @@ cell modifyMember(const char* action, cell guildHandle, cell userHandle, const D
 	const std::string guildId = guildIdForHandle(guildHandle);
 	const std::string userId = userIdForHandle(userHandle);
 	if (guildId.empty() || userId.empty() || reason.size() > 512) return 0;
-	return submitAction(action, [guildId, userId, payload = body.dump(), reason](DiscordHTTP& rest)
+	return submitAction(action, [guildId, userId, payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace), reason](DiscordHTTP& rest)
 	{
 		return rest.modifyGuildMember(guildId, userId, payload, reason);
 	}) ? 1 : 0;
@@ -556,7 +556,7 @@ cell AMX_NATIVE_CALL Native_SetBotNickname(AMX* amx, cell* params)
 	const std::string guildId = guildIdForHandle(params[1]);
 	const std::string nickname = getAmxString(amx, params[2]);
 	if (guildId.empty() || nickname.size() > 32) return 0;
-	const std::string body = DiscordJson { { "nick", nickname.empty() ? DiscordJson(nullptr) : DiscordJson(nickname) } }.dump();
+	const std::string body = DiscordJson { { "nick", nickname.empty() ? DiscordJson(nullptr) : DiscordJson(nickname) } }.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 	return submitAction("DBR_SetBotNickname", [guildId, body](DiscordHTTP& rest)
 	{
 		return rest.request(http::verb::patch, "/guilds/" + guildId + "/members/@me", body);
@@ -577,7 +577,7 @@ cell AMX_NATIVE_CALL Native_SetBotUsername(AMX* amx, cell* params)
 {
 	const std::string username = hasParams(params, 1) ? getAmxString(amx, params[1]) : std::string();
 	if (username.size() < 2 || username.size() > 32) return 0;
-	const std::string body = DiscordJson { { "username", username } }.dump();
+	const std::string body = DiscordJson { { "username", username } }.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 	return submitAction("DBR_SetBotUsername", [body](DiscordHTTP& rest)
 	{
 		return rest.request(http::verb::patch, "/users/@me", body);
@@ -587,7 +587,8 @@ cell AMX_NATIVE_CALL Native_SetBotUsername(AMX* amx, cell* params)
 cell setBotImage(AMX* amx, cell* params, const char* field, const char* action)
 {
 	if (!hasParams(params, 1)) return 0;
-	const std::string source = getAmxString(amx, params[1]);
+	// A file path must keep the script's bytes: Windows opens it in the ANSI code page.
+	const std::string source = getAmxStringRaw(amx, params[1]);
 	const std::string key = field;
 	// Reading and encoding the file happens on the REST worker so a large
 	// image never stalls the server tick.
@@ -601,7 +602,7 @@ cell setBotImage(AMX* amx, cell* params, const char* field, const char* action)
 			if (!loadImageDataUri(source, dataUri, error)) return localFailure(error);
 			body[key] = dataUri;
 		}
-		return rest.request(http::verb::patch, "/users/@me", body.dump());
+		return rest.request(http::verb::patch, "/users/@me", body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 	}, refreshBotUser) ? 1 : 0;
 }
 
@@ -619,7 +620,7 @@ cell AMX_NATIVE_CALL Native_SetBotDescription(AMX* amx, cell* params)
 {
 	const std::string description = hasParams(params, 1) ? getAmxString(amx, params[1]) : std::string();
 	if (description.size() > 400) return 0;
-	const std::string body = DiscordJson { { "description", description } }.dump();
+	const std::string body = DiscordJson { { "description", description } }.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 	return submitAction("DBR_SetBotDescription", [body](DiscordHTTP& rest)
 	{
 		return rest.request(http::verb::patch, "/applications/@me", body);
@@ -692,7 +693,7 @@ cell AMX_NATIVE_CALL Native_ReplyMessage(AMX* amx, cell* params)
 		{ "message_reference", { { "message_id", messageId }, { "fail_if_not_exists", false } } }
 	};
 	if (params[3] == 0) body["allowed_mentions"] = { { "parse", { "users", "roles", "everyone" } }, { "replied_user", false } };
-	return submitAction("DBR_ReplyMessage", [channelId, payload = body.dump()](DiscordHTTP& rest)
+	return submitAction("DBR_ReplyMessage", [channelId, payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)](DiscordHTTP& rest)
 	{
 		return rest.sendMessagePayload(channelId, payload);
 	}, [callback](const DiscordHTTP::Response& response)
@@ -732,7 +733,7 @@ cell AMX_NATIVE_CALL Native_BulkDeleteMessages(AMX* amx, cell* params)
 		{
 			for (const auto& message : messages)
 			{
-				const std::string id = message.is_object() ? message.value("id", std::string()) : std::string();
+				const std::string id = message.is_object() ? jsonString(message, "id") : std::string();
 				const uint64_t createdMs = (DiscordUtils::stringToSnowflake(id) >> 22) + DISCORD_EPOCH_MS;
 				// Discord refuses to bulk delete messages older than two weeks.
 				if (!id.empty() && nowMs - createdMs < BULK_DELETE_MAX_AGE_MS) ids.push_back(id);
@@ -740,15 +741,15 @@ cell AMX_NATIVE_CALL Native_BulkDeleteMessages(AMX* amx, cell* params)
 		}
 		DiscordHTTP::Response result { 200, {}, true, {}, 0.0, false };
 		if (ids.size() == 1) result = rest.deleteMessage(channelId, ids.front());
-		else if (ids.size() > 1) result = rest.request(http::verb::post, "/channels/" + channelId + "/messages/bulk-delete", DiscordJson { { "messages", ids } }.dump());
-		if (result.success) result.body = DiscordJson { { "deleted", ids.size() } }.dump();
+		else if (ids.size() > 1) result = rest.request(http::verb::post, "/channels/" + channelId + "/messages/bulk-delete", DiscordJson { { "messages", ids } }.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
+		if (result.success) result.body = DiscordJson { { "deleted", ids.size() } }.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 		return result;
 	}, [callback](const DiscordHTTP::Response& response)
 	{
 		if (!callback) return;
 		cell deleted = 0;
 		const DiscordJson data = response.success ? DiscordJson::parse(response.body, nullptr, false) : DiscordJson();
-		if (data.is_object()) deleted = static_cast<cell>(data.value("deleted", 0));
+		if (data.is_object()) deleted = static_cast<cell>(jsonInt(data, "deleted", 0));
 		executePawnCallback(*callback, { deleted });
 	}) ? 1 : 0;
 }

@@ -382,7 +382,7 @@ bool ComponentStore::validate(Handle handle, std::string& error) const
 			break;
 		case Button:
 		{
-			const int style = data.value("style", 1);
+			const int style = jsonInt(data, "style", 1);
 			if (style < 1 || style > 6) { error = "button style is invalid"; return false; }
 			if (style == 5 && !hasString(data, "url")) { error = "link buttons require a URL"; return false; }
 			if (style == 6 && !hasString(data, "sku_id")) { error = "premium buttons require a SKU id"; return false; }
@@ -431,8 +431,8 @@ bool ComponentStore::validate(Handle handle, std::string& error) const
 	}
 	if (isSelectType(component->type))
 	{
-		const int minValues = data.value("min_values", 1);
-		const int maxValues = data.value("max_values", 1);
+		const int minValues = jsonInt(data, "min_values", 1);
+		const int maxValues = jsonInt(data, "max_values", 1);
 		if (minValues < 0 || maxValues < 1 || minValues > maxValues || maxValues > 25)
 		{
 			error = "select menu value range is invalid";
@@ -944,13 +944,13 @@ const DiscordJson* findCommandOption(const DiscordJson& data, const std::string&
 	for (const auto& option : *options)
 	{
 		if (!option.is_object()) continue;
-		const int type = option.value("type", 0);
+		const int type = jsonInt(option, "type", 0);
 		if (type == SubCommandOption || type == SubCommandGroupOption)
 		{
 			if (const DiscordJson* nested = findCommandOption(option, name)) return nested;
 			continue;
 		}
-		if (option.value("name", std::string()) == name) return &option;
+		if (jsonString(option, "name") == name) return &option;
 	}
 	return nullptr;
 }
@@ -963,7 +963,7 @@ const DiscordJson* findFocusedOption(const DiscordJson& data)
 	for (const auto& option : *options)
 	{
 		if (!option.is_object()) continue;
-		if (option.value("focused", false)) return &option;
+		if (jsonBool(option, "focused", false)) return &option;
 		if (const DiscordJson* nested = findFocusedOption(option)) return nested;
 	}
 	return nullptr;
@@ -977,12 +977,12 @@ std::string findSubcommand(const DiscordJson& data, bool group)
 	for (const auto& option : *options)
 	{
 		if (!option.is_object()) continue;
-		const int type = option.value("type", 0);
+		const int type = jsonInt(option, "type", 0);
 		if (type == SubCommandGroupOption)
 		{
-			return group ? option.value("name", std::string()) : findSubcommand(option, false);
+			return group ? jsonString(option, "name") : findSubcommand(option, false);
 		}
-		if (type == SubCommandOption) return group ? std::string() : option.value("name", std::string());
+		if (type == SubCommandOption) return group ? std::string() : jsonString(option, "name");
 	}
 	return {};
 }
@@ -1011,7 +1011,7 @@ bool collectFromComponents(const DiscordJson& node, const std::string& customId,
 		return false;
 	}
 	if (!node.is_object()) return false;
-	if (node.value("custom_id", std::string()) == customId)
+	if (jsonString(node, "custom_id") == customId)
 	{
 		appendValues(node, out);
 		return true;
@@ -1028,7 +1028,7 @@ void collectSubmittedValues(const DiscordJson& data, const std::string& customId
 	if (!data.is_object()) return;
 	// Select menu interactions carry their values at the top level; modal
 	// submissions nest them inside action rows or labels.
-	if (customId.empty() || data.value("custom_id", std::string()) == customId)
+	if (customId.empty() || jsonString(data, "custom_id") == customId)
 	{
 		const auto values = data.find("values");
 		if (values != data.end() && values->is_array())
@@ -1047,6 +1047,6 @@ std::string jsonScalarToString(const DiscordJson& value)
 	if (value.is_string()) return value.get<std::string>();
 	if (value.is_boolean()) return value.get<bool>() ? "true" : "false";
 	if (value.is_null()) return {};
-	return value.dump();
+	return value.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 }
 }

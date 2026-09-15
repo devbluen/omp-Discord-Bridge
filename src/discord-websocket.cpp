@@ -136,7 +136,25 @@ void DiscordWebSocket::run()
 	}
 	networkStateCondition_.notify_all();
 	startResolve();
-	ioc_.run();
+	// A handler that throws would otherwise escape this thread and terminate the
+	// whole server process.  Log it and keep the network loop alive.
+	for (;;)
+	{
+		try
+		{
+			ioc_.run();
+			break;
+		}
+		catch (const std::exception& exception)
+		{
+			DiscordLogWarning(core_, std::string("[DiscordBridge] Gateway network error: ") + exception.what());
+		}
+		catch (...)
+		{
+			DiscordLogWarning(core_, "[DiscordBridge] Gateway network error: unknown exception");
+		}
+		if (shouldStop_ || ioc_.stopped()) break;
+	}
 	{
 		std::lock_guard<std::mutex> lock(networkStateMutex_);
 		networkRunning_ = false;
@@ -624,7 +642,7 @@ bool DiscordWebSocket::sendPresenceUpdate(int status, int activityType, const st
 		if (activityType == 1 && !activityUrl.empty()) activity["url"] = activityUrl;
 		payload["d"]["activities"].push_back(std::move(activity));
 	}
-	return sendMessage(payload.dump());
+	return sendMessage(payload.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 }
 
 void DiscordWebSocket::requestGuildMembers(const std::string& guildId)
@@ -633,7 +651,7 @@ void DiscordWebSocket::requestGuildMembers(const std::string& guildId)
 		{ "op", 8 },
 		{ "d", { { "guild_id", guildId }, { "query", "" }, { "limit", 0 } } }
 	};
-	sendMessage(payload.dump());
+	sendMessage(payload.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 }
 
 void DiscordWebSocket::handleMessage(const std::string& message)
@@ -644,7 +662,7 @@ void DiscordWebSocket::handleMessage(const std::string& message)
 		return;
 	}
 
-	const int op = payload.value("op", -1);
+	const int op = jsonInt(payload, "op", -1);
 	bool payloadWasRewritten = false;
 	if ((payload.find("s") != payload.end()) && !payload["s"].is_null() && payload["s"].is_number_integer())
 	{
@@ -653,11 +671,11 @@ void DiscordWebSocket::handleMessage(const std::string& message)
 
 	if (op == 0)
 	{
-		const std::string event = payload.value("t", std::string());
+		const std::string event = jsonString(payload, "t");
 		if (event == "READY" && (payload.find("d") != payload.end()) && payload["d"].is_object())
 		{
-			sessionId_ = payload["d"].value("session_id", std::string());
-			resumeGatewayUrl_ = payload["d"].value("resume_gateway_url", std::string());
+			sessionId_ = jsonString(payload["d"], "session_id");
+			resumeGatewayUrl_ = jsonString(payload["d"], "resume_gateway_url");
 			if (!resumeGatewayUrl_.empty()) setGatewayUrl(resumeGatewayUrl_);
 		}
 		if ((event == "GUILD_CREATE" || event == "GUILD_UPDATE") && payload["d"].is_object())
@@ -700,7 +718,7 @@ void DiscordWebSocket::handleMessage(const std::string& message)
 				part["d"]["members"] = DiscordJson::array();
 				const size_t end = std::min(offset + 100, members.size());
 				for (size_t index = offset; index < end; ++index) part["d"]["members"].push_back(members[index]);
-				if (messageCallback_) messageCallback_(part.dump());
+				if (messageCallback_) messageCallback_(part.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 			}
 			return;
 		}
@@ -736,7 +754,7 @@ void DiscordWebSocket::handleMessage(const std::string& message)
 	}
 	else if (op == 10 && (payload.find("d") != payload.end()) && payload["d"].is_object())
 	{
-		heartbeatInterval_ = payload["d"].value("heartbeat_interval", 0);
+		heartbeatInterval_ = jsonInt(payload["d"], "heartbeat_interval", 0);
 		heartbeatTimer_.cancel();
 		scheduleHeartbeat();
 		if (!identified_)
@@ -755,7 +773,7 @@ void DiscordWebSocket::handleMessage(const std::string& message)
 
 	if (messageCallback_)
 	{
-		messageCallback_(payloadWasRewritten ? payload.dump() : message);
+		messageCallback_(payloadWasRewritten ? payload.dump(-1, ' ', false, DiscordJson::error_handler_t::replace) : message);
 	}
 }
 
@@ -771,13 +789,13 @@ void DiscordWebSocket::sendIdentify()
 			{ "properties", { { "$os", gatewayPlatform() }, { "$browser", "discord-bridge" }, { "$device", "discord-bridge" } } }
 		} }
 	};
-	sendMessage(payload.dump());
+	sendMessage(payload.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 }
 
 void DiscordWebSocket::sendHeartbeat()
 {
 	DiscordJson payload = { { "op", 1 }, { "d", lastSequence_ >= 0 ? DiscordJson(lastSequence_) : DiscordJson(nullptr) } };
-	sendMessage(payload.dump());
+	sendMessage(payload.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 }
 
 void DiscordWebSocket::sendResume()
@@ -791,7 +809,7 @@ void DiscordWebSocket::sendResume()
 		{ "op", 6 },
 		{ "d", { { "token", botToken_ }, { "session_id", sessionId_ }, { "seq", lastSequence_ } } }
 	};
-	sendMessage(payload.dump());
+	sendMessage(payload.dump(-1, ' ', false, DiscordJson::error_handler_t::replace));
 }
 
 std::string DiscordWebSocket::buildIdentifyPayload()
@@ -800,13 +818,13 @@ std::string DiscordWebSocket::buildIdentifyPayload()
 		{ "op", 2 },
 		{ "d", { { "token", botToken_ }, { "compress", false }, { "large_threshold", 50 }, { "intents", intents_ }, { "properties", { { "$os", gatewayPlatform() }, { "$browser", "discord-bridge" }, { "$device", "discord-bridge" } } } } }
 	};
-	return payload.dump();
+	return payload.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 }
 
 std::string DiscordWebSocket::buildHeartbeatPayload()
 {
 	DiscordJson payload = { { "op", 1 }, { "d", lastSequence_ >= 0 ? DiscordJson(lastSequence_) : DiscordJson(nullptr) } };
-	return payload.dump();
+	return payload.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 }
 
 std::string DiscordWebSocket::buildResumePayload()
@@ -815,7 +833,7 @@ std::string DiscordWebSocket::buildResumePayload()
 		{ "op", 6 },
 		{ "d", { { "token", botToken_ }, { "session_id", sessionId_ }, { "seq", lastSequence_ } } }
 	};
-	return payload.dump();
+	return payload.dump(-1, ' ', false, DiscordJson::error_handler_t::replace);
 }
 
 void DiscordWebSocket::update()
