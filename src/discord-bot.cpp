@@ -205,6 +205,10 @@ void DiscordBot::initializeConnection()
 		{
 			connected_ = false;
 			connecting_ = false;
+			// Startup failed, but natives may already have queued work.  Run it so
+			// each one fails visibly through its callback and DBR_OnActionFail,
+			// instead of waiting for a connection that is not coming.
+			startRestWorker();
 			return;
 		}
 	}
@@ -214,6 +218,7 @@ void DiscordBot::initializeConnection()
 	{
 		connected_ = false;
 		connecting_ = false;
+		if (!shouldStop_) startRestWorker();
 		return;
 	}
 	http_->setApplicationId(botId);
@@ -233,6 +238,10 @@ void DiscordBot::initializeConnection()
 		{
 			connected_ = false;
 			connecting_ = false;
+			// Startup failed, but natives may already have queued work.  Run it so
+			// each one fails visibly through its callback and DBR_OnActionFail,
+			// instead of waiting for a connection that is not coming.
+			startRestWorker();
 			return;
 		}
 	}
@@ -250,7 +259,7 @@ void DiscordBot::initializeConnection()
 	// Start queued REST work only after authentication has supplied the
 	// application id.  Natives may enqueue work during the handshake; it will
 	// wait here instead of racing command/interaction endpoints with startup.
-	restThread_ = std::thread(&DiscordBot::runRestTasks, this);
+	startRestWorker();
 	const bool started = websocket_->connect();
 	if (!started)
 	{
@@ -408,6 +417,12 @@ void DiscordBot::enqueueCompletion(std::function<void()> task)
 	}
 	if (completionTasks_.size() < 2048) completionQueueLimitLogged_ = false;
 	completionTasks_.push_back(std::move(task));
+}
+
+void DiscordBot::startRestWorker()
+{
+	if (restThread_.joinable() || restStop_ || shouldStop_) return;
+	restThread_ = std::thread(&DiscordBot::runRestTasks, this);
 }
 
 void DiscordBot::runRestTasks()
