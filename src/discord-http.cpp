@@ -13,7 +13,7 @@
 #include <openssl/ssl.h>
 #include <algorithm>
 #include <cctype>
-#include <thread>
+#include <boost/asio/steady_timer.hpp>
 
 namespace
 {
@@ -44,10 +44,112 @@ void logHttpFailure(ICore* core, const std::string& endpoint, const DiscordHTTP:
 }
 }
 
-DiscordHTTP::DiscordHTTP(ICore* core, const std::string& token)
-	: botToken_(token)
-	, core_(core)
+// All operations run on the REST worker's io_context. The request deadline
+// cancels DNS as well as the socket; TLS shutdown never delays the next request.
+struct DiscordHTTP::Transport
 {
+	net::io_context io;
+	ssl::context context { ssl::context::tlsv12_client };
+	tcp::resolver resolver { io };
+	net::steady_timer timer { io };
+	std::unique_ptr<beast::ssl_stream<beast::tcp_stream>> stream;
+	beast::flat_buffer buffer;
+	DiscordRateLimits::Time lastUsed {};
+
+	Transport()
+	{
+		DiscordTLS::configureCertificateVerification(context);
+		context.set_verify_mode(ssl::verify_peer);
+		context.set_verify_callback(ssl::host_name_verification(API_HOST));
+	}
+	void close()
+	{
+		if (stream)
+		{
+			beast::error_code ignored;
+			beast::get_lowest_layer(*stream).socket().close(ignored);
+			stream.reset();
+		}
+		buffer.consume(buffer.size());
+	}
+	http::response<http::string_body> exchange(http::request<http::string_body>& request)
+	{
+		if (stream && DiscordRateLimits::Clock::now() - lastUsed > std::chrono::seconds(15)) close();
+		const bool connected = static_cast<bool>(stream);
+		if (!stream)
+		{
+			stream = std::make_unique<beast::ssl_stream<beast::tcp_stream>>(io, context);
+			if (!SSL_set_tlsext_host_name(stream->native_handle(), API_HOST))
+				throw std::runtime_error("Unable to set TLS hostname");
+		}
+		io.restart();
+		beast::error_code failure;
+		bool timedOut = false;
+		http::response<http::string_body> response;
+		auto finish = [&](beast::error_code error)
+		{
+			failure = error;
+			timer.cancel();
+		};
+		auto write = [&]()
+		{
+			http::async_write(*stream, request, [&](beast::error_code error, size_t)
+			{
+				if (error) { finish(error); return; }
+				http::async_read(*stream, buffer, response, [&](beast::error_code error, size_t) { finish(error); });
+			});
+		};
+		timer.expires_after(std::chrono::seconds(20));
+		timer.async_wait([&](beast::error_code error)
+		{
+			if (error) return;
+			timedOut = true;
+			resolver.cancel();
+			beast::error_code ignored;
+			beast::get_lowest_layer(*stream).socket().close(ignored);
+		});
+		if (connected) write();
+		else resolver.async_resolve(API_HOST, API_PORT, [&](beast::error_code error, tcp::resolver::results_type results)
+		{
+			if (error || timedOut) { finish(error); return; }
+			beast::get_lowest_layer(*stream).async_connect(results, [&](beast::error_code error, const tcp::endpoint&)
+			{
+				if (error) { finish(error); return; }
+				stream->async_handshake(ssl::stream_base::client, [&](beast::error_code error)
+				{
+					if (error) { finish(error); return; }
+					write();
+				});
+			});
+		});
+		io.run();
+		if (timedOut || failure)
+		{
+			close();
+			if (timedOut) throw std::runtime_error("Discord HTTP request timed out after 20 seconds");
+			throw beast::system_error(failure);
+		}
+		lastUsed = DiscordRateLimits::Clock::now();
+		if (!response.keep_alive()) close();
+		return response;
+	}
+};
+
+DiscordHTTP::DiscordHTTP(ICore* core, const std::string& token)
+	: botToken_(token), core_(core)
+{
+}
+
+DiscordHTTP::~DiscordHTTP() = default;
+
+void DiscordHTTP::runTask(const std::function<void(DiscordHTTP&)>& task, unsigned& retries,
+	DiscordRateLimits::Time eligibleAt)
+{
+	taskRetries_ = &retries;
+	eligibleAt_ = eligibleAt;
+	try { task(*this); }
+	catch (...) { taskRetries_ = nullptr; throw; }
+	taskRetries_ = nullptr;
 }
 
 DiscordHTTP::Response DiscordHTTP::request(http::verb method, const std::string& endpoint, const std::string& body, const std::string& auditReason)
@@ -58,120 +160,85 @@ DiscordHTTP::Response DiscordHTTP::request(http::verb method, const std::string&
 DiscordHTTP::Response DiscordHTTP::makeRequest(http::verb method, const std::string& endpoint, const std::string& body, const std::string& auditReason)
 {
 	std::lock_guard<std::mutex> lock(requestMutex_);
-	Response response { 0, {}, false, {}, 0.0, false };
-
-	const std::string target = std::string(API_BASE) + (endpoint.empty() || endpoint.front() == '/' ? endpoint : "/" + endpoint);
-	for (int attempt = 0; attempt < 3; ++attempt)
+	const auto route = DiscordRateLimits::route(std::string(http::to_string(method)), endpoint);
+	const auto blocked = rateLimits_.blockedUntil(route);
+	const auto now = DiscordRateLimits::Clock::now();
+	if (blocked > (taskRetries_ ? eligibleAt_ : now))
 	{
-		response = Response { 0, {}, false, {}, 0.0, false };
-		const auto now = std::chrono::steady_clock::now();
-		if (now < globalBlockedUntil_)
-		{
-			std::this_thread::sleep_for(globalBlockedUntil_ - now);
-		}
-
-		try
-		{
-			net::io_context ioc;
-			ssl::context ctx(ssl::context::tlsv12_client);
-			DiscordTLS::configureCertificateVerification(ctx);
-			ctx.set_verify_mode(ssl::verify_peer);
-			ctx.set_verify_callback(ssl::host_name_verification(API_HOST));
-
-			tcp::resolver resolver(ioc);
-			beast::ssl_stream<beast::tcp_stream> stream(ioc, ctx);
-			if (!SSL_set_tlsext_host_name(stream.native_handle(), API_HOST))
-			{
-				throw beast::system_error(beast::error_code(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category()));
-			}
-
-			auto const results = resolver.resolve(API_HOST, API_PORT);
-			beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(20));
-			beast::get_lowest_layer(stream).connect(results);
-			stream.handshake(ssl::stream_base::client);
-
-			http::request<http::string_body> req { method, target, 11 };
-			req.set(http::field::host, API_HOST);
-			req.set(http::field::user_agent, std::string("discord-bridge/") + DISCORD_BRIDGE_VERSION + " (open.mp)");
-			req.set(http::field::authorization, "Bot " + botToken_);
-			if (!auditReason.empty()) req.set("X-Audit-Log-Reason", DiscordUtils::urlEncode(auditReason));
-			if (!body.empty())
-			{
-				req.set(http::field::content_type, "application/json");
-				req.body() = body;
-			}
-			req.prepare_payload();
-
-			http::write(stream, req);
-
-			beast::flat_buffer buffer;
-			http::response<http::string_body> res;
-			http::read(stream, buffer, res);
-
-			response.statusCode = static_cast<int>(res.result_int());
-			response.body = res.body();
-			response.success = response.statusCode >= 200 && response.statusCode < 300;
-			for (const auto& field : res.base())
-			{
-				std::string key(field.name_string());
-				std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-				response.headers[key] = std::string(field.value().data(), field.value().size());
-			}
-
-			const auto retryHeader = response.headers.find("retry-after");
-			if (retryHeader != response.headers.end())
-			{
-				try { response.retryAfter = std::stod(retryHeader->second); } catch (...) { response.retryAfter = 0.0; }
-			}
-			if (response.statusCode == 429)
-			{
-				const DiscordJson error = DiscordJson::parse(response.body, nullptr, false);
-				if (!error.is_discarded() && error.is_object() && (error.find("retry_after") != error.end()) && error["retry_after"].is_number())
-				{
-					response.retryAfter = std::max(response.retryAfter, error["retry_after"].get<double>());
-				}
-				const auto globalHeader = response.headers.find("x-ratelimit-global");
-				response.globalRateLimit = globalHeader != response.headers.end() && globalHeader->second == "true";
-				if (response.globalRateLimit)
-				{
-					globalBlockedUntil_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<long long>(response.retryAfter * 1000.0) + 250);
-				}
-			}
-
-			beast::error_code ec;
-			stream.shutdown(ec);
-			if (ec == net::error::eof || ec == ssl::error::stream_truncated)
-			{
-				ec = {};
-			}
-		}
-		catch (const std::exception& e)
-		{
-			response.body = e.what();
-			response.success = false;
-		}
-
-		if (response.statusCode != 429 || response.retryAfter <= 0.0 || attempt == 2)
-		{
-			// Startup has a dedicated, human-readable warning in DiscordBot;
-			// other REST failures are reported here once after their retries.
-			if (!response.success && endpoint != "/users/@me" && endpoint != "/gateway/bot")
-			{
-				const std::string detail = httpFailureDetail(response, botToken_);
-				const std::string failureKey = std::to_string(response.statusCode) + ":" + detail;
-				const auto now = std::chrono::steady_clock::now();
-				if (failureKey != lastFailureLogKey_ || now - lastFailureLogAt_ >= std::chrono::minutes(1))
-				{
-					logHttpFailure(core_, target, response, detail);
-					lastFailureLogKey_ = failureKey;
-					lastFailureLogAt_ = now;
-				}
-			}
-			return response;
-		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long long>(response.retryAfter * 1000.0) + 250));
+		if (taskRetries_) throw DiscordRestDeferred(blocked);
+		return Response { 429, "Discord rate limit pending", false, {}, std::chrono::duration<double>(blocked - now).count(), false };
 	}
-
+	Response response { 0, {}, false, {}, 0.0, false };
+	const std::string target = std::string(API_BASE) + (endpoint.empty() || endpoint.front() == '/' ? endpoint : "/" + endpoint);
+	try
+	{
+		if (!transport_) transport_ = std::make_unique<Transport>();
+		http::request<http::string_body> req { method, target, 11 };
+		req.set(http::field::host, API_HOST);
+		req.set(http::field::user_agent, std::string("discord-bridge/") + DISCORD_BRIDGE_VERSION + " (open.mp)");
+		req.set(http::field::authorization, "Bot " + botToken_);
+		req.keep_alive(true);
+		if (!auditReason.empty()) req.set("X-Audit-Log-Reason", DiscordUtils::urlEncode(auditReason));
+		if (!body.empty())
+		{
+			req.set(http::field::content_type, "application/json");
+			req.body() = body;
+		}
+		req.prepare_payload();
+		const auto res = transport_->exchange(req);
+		response.statusCode = static_cast<int>(res.result_int());
+		response.body = res.body();
+		response.success = response.statusCode >= 200 && response.statusCode < 300;
+		for (const auto& field : res.base())
+		{
+			std::string key(field.name_string());
+			std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			response.headers[key] = std::string(field.value());
+		}
+	}
+	catch (const std::exception& error)
+	{
+		// A failed read may follow a successful send. Never automatically replay
+		// an ambiguous network failure, which could duplicate a message.
+		transport_.reset();
+		response.body = error.what();
+	}
+	const auto header = [&](const char* name) -> std::string
+	{
+		const auto it = response.headers.find(name);
+		return it == response.headers.end() ? std::string() : it->second;
+	};
+	if (response.statusCode == 429)
+	{
+		double retry = DiscordRateLimits::seconds(header("retry-after"));
+		const auto error = DiscordJson::parse(response.body, nullptr, false);
+		if (error.is_object())
+		{
+			const auto value = error.find("retry_after");
+			if (value != error.end() && value->is_number()) retry = std::max(retry, DiscordRateLimits::seconds(value->dump()));
+			const auto global = error.find("global");
+			response.globalRateLimit = global != error.end() && global->is_boolean() && global->get<bool>();
+		}
+		response.retryAfter = retry < 0 ? 1.0 : retry;
+		response.globalRateLimit = response.globalRateLimit || header("x-ratelimit-global") == "true" || header("x-ratelimit-scope") == "global";
+	}
+	rateLimits_.observe(route, response.headers, response.statusCode == 429, response.retryAfter,
+		response.globalRateLimit, DiscordRateLimits::Clock::now());
+	if (response.statusCode == 429 && taskRetries_ && ++*taskRetries_ < 3)
+		throw DiscordRestDeferred(rateLimits_.blockedUntil(route));
+	if (!response.success && endpoint != "/users/@me" && endpoint != "/gateway/bot")
+	{
+		const std::string detail = httpFailureDetail(response, botToken_);
+		const std::string failureKey = std::to_string(response.statusCode) + ":" + detail;
+		const auto now = DiscordRateLimits::Clock::now();
+		if (failureKey != lastFailureLogKey_ || now - lastFailureLogAt_ >= std::chrono::minutes(1))
+		{
+			// Route keys omit interaction/webhook tokens.
+			logHttpFailure(core_, route.key, response, detail);
+			lastFailureLogKey_ = failureKey;
+			lastFailureLogAt_ = now;
+		}
+	}
 	return response;
 }
 

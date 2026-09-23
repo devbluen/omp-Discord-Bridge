@@ -7,6 +7,7 @@
 // exposed to Pawn: message components (classic and V2), message builders and
 // modals.
 
+#include "discord-mentions.hpp"
 #include "natives-internal.hpp"
 #include "discord-bot.hpp"
 #include "discord-component.hpp"
@@ -49,6 +50,7 @@ enum InteractionType : int
 
 struct InteractionState
 {
+	std::vector<std::string> mentionedUserIds;
 	std::string id;
 	std::string token;
 	int type = 0;
@@ -473,6 +475,8 @@ void dispatchInteraction(const std::string& json)
 		}
 	}
 	cacheResolvedEntities(state);
+	if (auto options = state.data.find("options"); options != state.data.end())
+		DiscordMentions::collect(*options, state.mentionedUserIds);
 	if (auto message = payload.find("message"); message != payload.end() && message->is_object())
 	{
 		if (DiscordMessage* cached = bridge->upsertMessageFromJson(message->dump()))
@@ -680,6 +684,22 @@ cell AMX_NATIVE_CALL Native_GetInteractionOptionType(AMX* amx, cell* params)
 {
 	const DiscordJson* option = optionFor(amx, params);
 	return option ? static_cast<cell>(option->value("type", 0)) : 0;
+}
+
+cell AMX_NATIVE_CALL Native_GetInteractionMentionCount(AMX* amx, cell* params)
+{
+	if (!hasParams(params, 2)) return 0;
+	const InteractionState* state = interactionFor(params[1]);
+	return state && writeCell(amx, params[2], static_cast<cell>(state->mentionedUserIds.size())) ? 1 : 0;
+}
+
+cell AMX_NATIVE_CALL Native_GetInteractionMention(AMX* amx, cell* params)
+{
+	if (!hasParams(params, 3) || params[2] < 0) return 0;
+	const InteractionState* state = interactionFor(params[1]);
+	if (!state || static_cast<size_t>(params[2]) >= state->mentionedUserIds.size()) return 0;
+	const cell user = assignUserHandle(state->mentionedUserIds[static_cast<size_t>(params[2])]);
+	return user && writeCell(amx, params[3], user) ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_GetInteractionOptionString(AMX* amx, cell* params)
@@ -1616,13 +1636,17 @@ cell AMX_NATIVE_CALL Native_SendDirectMessage(AMX* amx, cell* params)
 	}
 	DiscordJson body;
 	if (!takeBuilderPayload(params[2], false, body, "DBR_SendDirectMessage")) return 0;
-	return submitAction("DBR_SendDirectMessage", [userId, payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)](DiscordHTTP& rest)
+	return submitAction("DBR_SendDirectMessage", [userId, channelId = std::string(), payload = body.dump(-1, ' ', false, DiscordJson::error_handler_t::replace)](DiscordHTTP& rest) mutable
 	{
-		const DiscordHTTP::Response channel = rest.createDM(userId);
-		if (!channel.success) return channel;
-		const DiscordJson data = DiscordJson::parse(channel.body, nullptr, false);
-		const std::string channelId = data.is_object() ? jsonString(data, "id") : std::string();
-		if (channelId.empty()) return DiscordHTTP::Response { 0, "Discord did not return a DM channel", false, {}, 0.0, false };
+		// Preserve the completed first step if sending is deferred by a bucket.
+		if (channelId.empty())
+		{
+			const DiscordHTTP::Response channel = rest.createDM(userId);
+			if (!channel.success) return channel;
+			const DiscordJson data = DiscordJson::parse(channel.body, nullptr, false);
+			channelId = data.is_object() ? jsonString(data, "id") : std::string();
+			if (channelId.empty()) return DiscordHTTP::Response { 0, "Discord did not return a DM channel", false, {}, 0.0, false };
+		}
 		return rest.sendMessagePayload(channelId, payload);
 	}, [callback](const DiscordHTTP::Response& response)
 	{
@@ -1776,6 +1800,8 @@ void appendInteractionNatives(std::vector<AMX_NATIVE_INFO>& natives)
 		{ "DBR_HasInteractionOption", Native_HasInteractionOption },
 		{ "DBR_GetInteractionOptionType", Native_GetInteractionOptionType },
 		{ "DBR_GetInteractionOptionString", Native_GetInteractionOptionString },
+		{ "DBR_GetInteractionMentionCount", Native_GetInteractionMentionCount },
+		{ "DBR_GetInteractionMention", Native_GetInteractionMention },
 		{ "DBR_GetInteractionOptionInt", Native_GetInteractionOptionInt },
 		{ "DBR_GetInteractionOptionFloat", Native_GetInteractionOptionFloat },
 		{ "DBR_GetInteractionOptionBool", Native_GetInteractionOptionBool },

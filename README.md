@@ -77,6 +77,34 @@ In your script:
 #include <discord-bridge>
 ```
 
+#### Existing Discord Connector scripts
+
+Install the primary `discord-bridge.inc` from the bridge release. Download
+`discord-dcc-compat.inc` and `discord-connector.inc` from
+[omp-Discord-Bridge-compat](https://github.com/itsneufox/omp-Discord-Bridge-compat)
+into the same compiler include directory, replacing the old
+`discord-connector.inc`, and keep:
+
+```pawn
+#include <discord-connector>
+```
+
+You can also use `#include <discord-dcc-compat>` explicitly. Recompile your
+scripts and load the matching **Discord Bridge** binary instead of Discord
+Connector. Existing `.amx` files compiled against the original connector must
+be recompiled. Configure the bot as described below.
+
+The adapter covers DCC APIs with an existing bridge counterpart: names, tags,
+enums, gateway callbacks, embeds, moderation and commands. Async callbacks keep
+DCC's original argument order and `DCC_GetCreated*()` result getters. Slash
+commands retain their optional `arguments` text field. `DCC_On*` maps to the
+same public as `DBR_On*`; define each event only once per script.
+
+These APIs have no bridge counterpart and are deliberately omitted:
+`DCC_GetUserDiscriminator`, `DCC_GetInteractionMentionCount` and
+`DCC_GetInteractionMention`. Code using them needs updating; this is source
+compatibility for the supported subset, not full legacy binary compatibility.
+
 ### 2. Create the bot on Discord
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications)
@@ -544,7 +572,8 @@ Outputs in `build/windows-x86/`:
 
 - `plugins/Release/discord-bridge.dll`: the plugin, with OpenSSL built in, so it
   is the only file to copy (`components/` on open.mp, `plugins/` on SA-MP);
-- `pawno/include/discord-bridge.inc`: the include.
+- `pawno/include/discord-bridge.inc`: the primary include. Compatibility includes
+  are distributed separately in [omp-Discord-Bridge-compat](https://github.com/itsneufox/omp-Discord-Bridge-compat).
 
 Windows servers are 32-bit, so the preset always builds for Win32.
 
@@ -563,7 +592,66 @@ install the `:i386` versions of the libraries (see `.github/workflows/build.yml`
 
 Set `-DDISCORD_BRIDGE_VERSION=X.Y.Z` on either platform to choose the version.
 
+## Batch rate-limited chat (opt-in)
+
+Batching is **off by default**. Keep using the ordinary send function:
+
+```pawn
+DBR_SendChannelMessage(chatChannel, "[Player] Hello!");
+```
+
+To enable batching in open.mp's `config.json`:
+
+```json
+{
+  "discord_batch_rate_limited": true,
+  "discord_batch_interval_ms": 5000
+}
+```
+
+For SA-MP, in `server.cfg`:
+
+```text
+discord_batch_rate_limited 1
+discord_batch_interval_ms 5000
+```
+
+With the option enabled, normal chat is sent immediately through the REST queue.
+When Discord's rate-limit headers or a 429 response delay a send, pending plain
+text messages for that channel are joined with newlines. The first deferred send
+starts a **5,000 ms (5 second)** window; later messages do not restart it. Sending
+waits for both that window and Discord's retry deadline. A longer Discord limit
+can therefore delay delivery beyond five seconds. Once the backlog is sent,
+normal immediate sending resumes. Discord-to-game messages continue through the
+Gateway as usual; batching does not pause incoming chat or the game thread.
+
+Set `discord_batch_rate_limited` to `false` (SA-MP: `0`) to disable batching.
+The dotted aliases `discord.batch_rate_limited` and `discord.batch_interval_ms`
+are also accepted. Environment variables `DISCORD_BATCH_RATE_LIMITED` and
+`DISCORD_BATCH_INTERVAL_MS` take priority over their respective config settings.
+For the environment toggle, use `true` or `1` to enable; other values disable it.
+The interval must be a positive integer in milliseconds; invalid values fall back
+to 5000. Setting an interval alone does **not** enable batching. Restart the server
+after changing configuration.
+
+Each combined message is limited to 2,000 UTF-8 bytes, keeping each original
+message intact and preserving channel order. Sends with completion callbacks
+remain separate so each callback receives its own message result. Embeds,
+interactions and other REST operations are not combined, and intervening REST
+operations may separate batches. Unblocked channels can continue sending.
+
+The REST queue accepts up to 8,192 pending original requests per bot, including
+requests combined into batches. A return value of `1` means queued, not delivered;
+`0` means invalid input, a stopped bot or a full queue. HTTP failures are logged.
+Disconnecting discards queued messages. No separate batching native is needed;
+the compatibility include's `DCC_SendChannelMessage` uses the same behavior.
+
 ## AI disclosure
 
 AI tools assisted with parts of the code and documentation. Review the source
 and test the plugin on your own server before using it in production.
+
+## License
+
+Licensed under the [MIT License](LICENSE). Bundled third-party code retains its
+own licenses.

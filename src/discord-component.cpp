@@ -164,6 +164,27 @@ void DiscordBridgeComponent::loadConfiguration()
 		}
 	}
 
+	if (const char* interval = std::getenv("DISCORD_BATCH_INTERVAL_MS"); interval && *interval)
+	{
+		configuredBatchIntervalMs_ = DiscordMessageBatchConfig::interval(interval);
+	}
+	else
+	{
+		int* configInterval = core_->getConfig().getInt("discord_batch_interval_ms");
+		if (!configInterval) configInterval = core_->getConfig().getInt("discord.batch_interval_ms");
+		configuredBatchIntervalMs_ = configInterval && *configInterval > 0 ? *configInterval : DiscordMessageBatchConfig::DEFAULT_INTERVAL_MS;
+	}
+	if (const char* enabled = std::getenv("DISCORD_BATCH_RATE_LIMITED"); enabled && *enabled)
+	{
+		configuredBatchRateLimited_ = DiscordMessageBatchConfig::enabled(enabled);
+	}
+	else
+	{
+		bool* configEnabled = core_->getConfig().getBool("discord_batch_rate_limited");
+		if (!configEnabled) configEnabled = core_->getConfig().getBool("discord.batch_rate_limited");
+		configuredBatchRateLimited_ = configEnabled && *configEnabled;
+	}
+
 	if (envChannelId && *envChannelId)
 	{
 		configuredChannelId_ = envChannelId;
@@ -273,6 +294,15 @@ void DiscordBridgeComponent::provideConfiguration(ILogger& logger, IEarlyConfig&
 	{
 		config.setInt("discord_bot_intents", DISCORD_DEFAULT_INTENTS);
 	}
+	if (defaults || config.getType("discord_batch_interval_ms") == ConfigOptionType_None)
+	{
+		config.setInt("discord_batch_interval_ms", DiscordMessageBatchConfig::DEFAULT_INTERVAL_MS);
+	}
+	if (defaults || config.getType("discord_batch_rate_limited") == ConfigOptionType_None)
+	{
+		config.setBool("discord_batch_rate_limited", false);
+	}
+
 	if (defaults || config.getType("discord.channel_name") == ConfigOptionType_None)
 	{
 		config.setString("discord.channel_name", "");
@@ -285,6 +315,8 @@ void DiscordBridgeComponent::provideConfiguration(ILogger& logger, IEarlyConfig&
 	// alias of each flat key.
 	config.addAlias("discord.bot_token", "discord_bot_token", true);
 	config.addAlias("discord.intents", "discord_bot_intents", true);
+	config.addAlias("discord.batch_interval_ms", "discord_batch_interval_ms", true);
+	config.addAlias("discord.batch_rate_limited", "discord_batch_rate_limited", true);
 	config.addAlias("discord_channel_name", "discord.channel_name", true);
 	config.addAlias("discord_channel_id", "discord.channel_id", true);
 }
@@ -298,7 +330,8 @@ void DiscordBridgeComponent::onFree(IComponent* component)
 	}
 }
 
-bool DiscordBridgeComponent::start(StringView token, int intents, StringView channelId, StringView channelName)
+bool DiscordBridgeComponent::start(StringView token, int intents, StringView channelId, StringView channelName,
+	int batchIntervalMs, bool batchRateLimited)
 {
 	sampMode_ = true;
 	pawn_ = &sampPawn_;
@@ -307,6 +340,8 @@ bool DiscordBridgeComponent::start(StringView token, int intents, StringView cha
 	configuredChannelName_.assign(channelName.data(), channelName.length());
 	configuredToken_.assign(token.data(), token.length());
 	configuredIntents_ = intents;
+	configuredBatchIntervalMs_ = batchIntervalMs > 0 ? batchIntervalMs : DiscordMessageBatchConfig::DEFAULT_INTERVAL_MS;
+	configuredBatchRateLimited_ = batchRateLimited;
 	configurationLoaded_ = true;
 	return connectConfiguredBot();
 }

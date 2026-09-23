@@ -77,6 +77,29 @@ No seu script:
 #include <discord-bridge>
 ```
 
+#### Scripts existentes do Discord Connector
+
+Instale o include principal `discord-bridge.inc` da release do bridge.
+Copie `discord-dcc-compat.inc` e `discord-connector.inc` do repositório
+[omp-Discord-Bridge-compat](https://github.com/itsneufox/omp-Discord-Bridge-compat)
+para a mesma pasta de includes, substituindo o `discord-connector.inc` antigo.
+Mantenha `#include <discord-connector>`. Também é possível usar
+`#include <discord-dcc-compat>` diretamente. Recompile os scripts e carregue o
+binário correspondente do **Discord Bridge** no lugar do Discord Connector.
+Arquivos `.amx` compilados com o connector original precisam ser recompilados.
+Configure o bot conforme as instruções abaixo.
+
+A compatibilidade cobre APIs DCC com equivalente no bridge: nomes, tags,
+enums, callbacks, embeds, moderação e comandos. Callbacks assíncronos mantêm
+os argumentos originais e os getters `DCC_GetCreated*()`. Comandos mantêm o
+campo de texto opcional `arguments`. `DCC_On*` e `DBR_On*` representam o mesmo
+public; defina cada evento apenas uma vez por script.
+
+Sem equivalente no bridge, estas funções ficam de fora:
+`DCC_GetUserDiscriminator`, `DCC_GetInteractionMentionCount` e
+`DCC_GetInteractionMention`. Scripts que usam essas funções precisam de
+ajustes. A compatibilidade é de código-fonte para o subconjunto suportado.
+
 ### 2. Crie o bot no Discord
 
 1. Acesse o [Discord Developer Portal](https://discord.com/developers/applications)
@@ -546,7 +569,8 @@ Resultados em `build/windows-x86/`:
 
 - `plugins/Release/discord-bridge.dll`: o plugin, com o OpenSSL embutido, então é
   o único arquivo a copiar (`components/` no open.mp, `plugins/` no SA-MP);
-- `pawno/include/discord-bridge.inc`: o include.
+- `pawno/include/discord-bridge.inc`: o include principal. Os includes de
+  compatibilidade ficam no [omp-Discord-Bridge-compat](https://github.com/itsneufox/omp-Discord-Bridge-compat).
 
 Servidores Windows são 32 bits, então o preset sempre compila para Win32.
 
@@ -565,7 +589,67 @@ e instale as bibliotecas `:i386` (veja `.github/workflows/build.yml`).
 
 Use `-DDISCORD_BRIDGE_VERSION=X.Y.Z` em qualquer plataforma para definir a versão.
 
+## Agrupar mensagens limitadas pelo Discord (opcional)
+
+O agrupamento fica **desativado por padrão**. Continue usando:
+
+```pawn
+DBR_SendChannelMessage(canalChat, "[Jogador] Olá!");
+```
+
+Para ativar no `config.json` do open.mp:
+
+```json
+{
+  "discord_batch_rate_limited": true,
+  "discord_batch_interval_ms": 5000
+}
+```
+
+No `server.cfg` do SA-MP:
+
+```text
+discord_batch_rate_limited 1
+discord_batch_interval_ms 5000
+```
+
+Com a opção ativa, mensagens normais entram na fila REST para envio imediato.
+Quando os cabeçalhos de limite do Discord ou uma resposta 429 adiam um envio,
+as mensagens de texto pendentes do mesmo canal são unidas por quebras de linha.
+O primeiro envio adiado inicia uma janela de **5.000 ms (5 segundos)**; novas
+mensagens não reiniciam esse prazo. O envio aguarda tanto essa janela quanto o
+prazo informado pelo Discord, que pode ser maior. Ao terminar a fila acumulada,
+os envios voltam ao comportamento imediato. O chat Discord → jogo continua
+pelo Gateway, sem pausar mensagens recebidas nem a execução do jogo.
+
+Use `discord_batch_rate_limited` como `false` (SA-MP: `0`) para desativar.
+Os aliases `discord.batch_rate_limited` e `discord.batch_interval_ms` também
+são aceitos. As variáveis de ambiente `DISCORD_BATCH_RATE_LIMITED` e
+`DISCORD_BATCH_INTERVAL_MS` têm prioridade sobre as respectivas configurações.
+Para ativar pela variável de ambiente, use `true` ou `1`; outros valores
+desativam. O intervalo deve ser um inteiro positivo em milissegundos; valores
+inválidos usam 5000. Definir apenas o intervalo **não** ativa o agrupamento.
+Reinicie o servidor após alterar a configuração.
+
+Cada mensagem combinada tem até 2.000 bytes UTF-8, sem dividir mensagens originais
+e mantendo a ordem do canal. Envios com callback ficam separados para que cada
+callback receba seu próprio resultado. Embeds, interações e outras operações
+REST não são agrupados; operações REST entre mensagens podem separar os lotes.
+Canais sem bloqueio continuam enviando.
+
+A fila REST aceita até 8.192 requisições originais pendentes por bot, incluindo
+as agrupadas. Retornar `1` significa que o envio entrou na fila, não que foi
+entregue; `0` indica entrada inválida, bot parado ou fila cheia. Falhas HTTP são
+registradas no log. Desconectar descarta mensagens pendentes. Não é necessário
+um native separado; `DCC_SendChannelMessage` tem o mesmo comportamento no include
+de compatibilidade.
+
 ## Aviso sobre IA
 
 Ferramentas de IA ajudaram em partes do código e da documentação. Revise o
 código e teste o plugin no seu servidor antes de usar em produção.
+
+## Licença
+
+Distribuído sob a [licença MIT](LICENSE). O código de terceiros incluído mantém
+suas próprias licenças.

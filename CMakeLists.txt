@@ -238,7 +238,7 @@ if(TARGET Boost::system AND NOT DISCORD_BRIDGE_STATIC_DEPS AND NOT DISCORD_BRIDG
 	)
 endif()
 
-# Copy include file
+# Compatibility includes are maintained in omp-Discord-Bridge-compat.
 configure_file(
 	"${CMAKE_CURRENT_SOURCE_DIR}/discord-bridge.inc"
 	"${CMAKE_BINARY_DIR}/pawno/include/discord-bridge.inc"
@@ -264,4 +264,27 @@ if(BUILD_TESTING)
 		${CMAKE_CURRENT_SOURCE_DIR}/third_party
 	)
 	add_test(NAME discord-bridge-builders COMMAND discord-bridge-builders-tests)
+endif()
+
+if(BUILD_TESTING)
+	find_package(Threads REQUIRED)
+	add_executable(discord-bridge-rest-tests tests/rest-tests.cpp)
+	target_include_directories(discord-bridge-rest-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+	target_link_libraries(discord-bridge-rest-tests PRIVATE Threads::Threads)
+	add_test(NAME discord-bridge-rest COMMAND discord-bridge-rest-tests)
+	set_tests_properties(discord-bridge-rest PROPERTIES TIMEOUT 15)
+	add_executable(discord-bridge-message-batches-tests tests/message-batches-tests.cpp)
+	target_include_directories(discord-bridge-message-batches-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+	target_link_libraries(discord-bridge-message-batches-tests PRIVATE Threads::Threads)
+	add_test(NAME discord-bridge-message-batches COMMAND discord-bridge-message-batches-tests)
+	set_tests_properties(discord-bridge-message-batches PROPERTIES TIMEOUT 45)
+endif()
+
+if(BUILD_TESTING)
+	add_executable(discord-bridge-mentions-tests tests/mentions-tests.cpp)
+	target_include_directories(discord-bridge-mentions-tests PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/src
+		${CMAKE_CURRENT_SOURCE_DIR}/third_party
+	)
+	add_test(NAME discord-bridge-mentions COMMAND discord-bridge-mentions-tests)
 endif()

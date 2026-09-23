@@ -43,8 +43,12 @@ struct PawnCallbackArg
 	std::vector<cell> array;
 };
 
+// Legacy DCC result getters are scoped to the requesting script and callback.
+enum class DccResult { None, Message, GuildChannel, GuildRole, PrivateChannel };
+
 struct PreparedPawnCallback
 {
+	DccResult dccResult = DccResult::None;
 	int scriptId = -1;
 	std::string name;
 	std::vector<PawnCallbackArg> args;

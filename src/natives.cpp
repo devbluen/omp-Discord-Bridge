@@ -411,6 +411,27 @@ bool pawnArrayRangeValid(NativePawnScript& script, cell address, size_t cells)
 	return end <= static_cast<uint64_t>(script.GetSTP());
 }
 
+namespace
+{
+DccResult g_capturingDccResult = DccResult::None;
+struct DccCallbackContext
+{
+	int scriptId = -1;
+	DccResult kind = DccResult::None;
+	cell handle = 0;
+};
+DccCallbackContext g_dccCallback;
+
+// Restores the previous value even if an AMX/native call throws or nests.
+template <typename T> struct ScopedDccValue
+{
+	T& target;
+	T previous;
+	ScopedDccValue(T& target, T value) : target(target), previous(target) { target = value; }
+	~ScopedDccValue() { target = previous; }
+};
+}
+
 bool executePawnCallback(const PreparedPawnCallback& prepared, const std::vector<cell>& leading)
 {
 	if (prepared.name.empty()) return true;
@@ -458,7 +479,7 @@ bool executePawnCallback(const PreparedPawnCallback& prepared, const std::vector
 			return false;
 		}
 	}
-	for (auto it = leading.rbegin(); it != leading.rend(); ++it)
+	for (auto it = leading.rbegin(); prepared.dccResult == DccResult::None && it != leading.rend(); ++it)
 	{
 		if (script->Push(*it) != AMX_ERR_NONE)
 		{
@@ -493,6 +514,8 @@ bool executePawnCallback(const PreparedPawnCallback& prepared, const std::vector
 			+ " leading parameter(s) before the format arguments");
 	}
 
+	ScopedDccValue<DccCallbackContext> context(g_dccCallback,
+		{ prepared.scriptId, prepared.dccResult, leading.empty() ? 0 : leading.front() });
 	cell result = 0;
 	const int error = script->Exec(&result, publicIndex);
 	script->Release(heap);
@@ -601,6 +624,7 @@ bool capturePawnCallback(AMX* amx, cell callbackParam, cell formatParam, cell* p
 	if (firstParam == 0 || firstParam - 1 > supplied || format.size() != supplied - (firstParam - 1)) return false;
 
 	prepared = std::make_shared<PreparedPawnCallback>();
+	prepared->dccResult = g_capturingDccResult;
 	NativePawnScript* script = pawnScriptFor(amx);
 	if (!script) return false;
 	prepared->scriptId = script->GetID();
@@ -1054,15 +1078,15 @@ cell AMX_NATIVE_CALL Native_SendChannelMessage(AMX* amx, cell* params)
 	if (nativeParamCount(params) >= 4 && !capturePawnCallback(amx, params[3], params[4], params, 5, callback)) return 0;
 	DiscordBot* bot = nativeBot();
 	if (!bot) return 0;
-	return bot->submitRestTask([bot, channelId, message, callback](DiscordHTTP& http)
+	std::function<void(const DiscordHTTP::Response&)> completion;
+	if (callback) completion = [bot, callback](const DiscordHTTP::Response& response)
 	{
-		const auto response = http.sendMessage(channelId, message);
-		if (!callback) return;
 		bot->enqueueCompletion([response, callback]()
 		{
 			completeMessageResponse(response.success, response.body, callback);
 		});
-	}) ? 1 : 0;
+	};
+	return bot->sendChannelMessage(channelId, message, std::move(completion)) ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_SetChannelName(AMX* amx, cell* params)
@@ -1152,6 +1176,15 @@ cell AMX_NATIVE_CALL Native_GetUserName(AMX* amx, cell* params)
 	}
 	const std::string name(user->getUsername().data(), user->getUsername().length());
 	return setAmxString(amx, params[2], name, params[3]) ? 1 : 0;
+}
+
+cell AMX_NATIVE_CALL Native_GetUserDiscriminator(AMX* amx, cell* params)
+{
+	if (nativeParamCount(params) < 3) return 0;
+	DiscordUser* user = resolveUserByHandle(params[1]);
+	if (!user) return 0;
+	const auto discriminator = user->getDiscriminator();
+	return setAmxString(amx, params[2], std::string(discriminator.data(), discriminator.length()), params[3]) ? 1 : 0;
 }
 
 cell AMX_NATIVE_CALL Native_IsUserBot(AMX* amx, cell* params)
@@ -2200,9 +2233,54 @@ cell AMX_NATIVE_CALL Native_SendChannelEmbedMessage(AMX* amx, cell* params)
 	return queued ? 1 : 0;
 }
 
+// DCC passes only the caller's variadic arguments to async callbacks.  The
+// result is available through its typed DCC_GetCreated* native during the call.
+template <AMX_NATIVE Target, DccResult Kind>
+cell AMX_NATIVE_CALL dccAsyncNative(AMX* amx, cell* params)
+{
+	ScopedDccValue<DccResult> capture(g_capturingDccResult, Kind);
+	return Target(amx, params);
+}
+
+template <DccResult Kind>
+cell AMX_NATIVE_CALL dccCreatedResult(AMX* amx, cell*)
+{
+	NativePawnScript* script = pawnScriptFor(amx);
+	return script && script->GetID() == g_dccCallback.scriptId && g_dccCallback.kind == Kind
+		? g_dccCallback.handle : 0;
+}
+
+cell AMX_NATIVE_CALL Native_DccCacheChannelMessage(AMX* amx, cell* params)
+{
+	const std::string channelId = getAmxString(amx, params[1]);
+	const std::string messageId = getAmxString(amx, params[2]);
+	if (!isDiscordSnowflake(channelId) || !isDiscordSnowflake(messageId)) return 0;
+	if (!component() || component()->findMessageById(messageId)) return 0;
+	std::shared_ptr<PreparedPawnCallback> callback;
+	if (!capturePawnCallback(amx, params[3], params[4], params, 5, callback)) return 0;
+	return submitAction("DCC_CacheChannelMessage", [channelId, messageId](DiscordHTTP& rest)
+	{
+		return rest.getMessage(channelId, messageId);
+	}, [callback](const DiscordHTTP::Response& response)
+	{
+		completeMessageResponse(response.success, response.body, callback);
+	}) ? 1 : 0;
+}
+
 void appendCoreNatives(std::vector<AMX_NATIVE_INFO>& natives)
 {
 	static const AMX_NATIVE_INFO kNatives[] = {
+		{ "DBR_DCC_SendChannelMessage", dccAsyncNative<Native_SendChannelMessage, DccResult::Message> },
+		{ "DBR_DCC_SendChannelEmbedMessage", dccAsyncNative<Native_SendChannelEmbedMessage, DccResult::Message> },
+		{ "DBR_DCC_CreateGuildChannel", dccAsyncNative<Native_CreateGuildChannel, DccResult::GuildChannel> },
+		{ "DBR_DCC_CreateGuildRole", dccAsyncNative<Native_CreateGuildRole, DccResult::GuildRole> },
+		{ "DBR_DCC_CreatePrivateChannel", dccAsyncNative<Native_CreatePrivateChannel, DccResult::PrivateChannel> },
+		{ "DBR_DCC_CacheChannelMessage", dccAsyncNative<Native_DccCacheChannelMessage, DccResult::Message> },
+		{ "DBR_DCC_GetCreatedMessage", dccCreatedResult<DccResult::Message> },
+		{ "DBR_DCC_GetCreatedGuildChannel", dccCreatedResult<DccResult::GuildChannel> },
+		{ "DBR_DCC_GetCreatedGuildRole", dccCreatedResult<DccResult::GuildRole> },
+		{ "DBR_DCC_GetCreatedPrivateChannel", dccCreatedResult<DccResult::PrivateChannel> },
+
 		{ "DBR_ConnectBot", Native_ConnectDiscordBot },
 		{ "DBR_IsConnected", Native_IsDiscordConnected },
 		{ "DBR_DisconnectBot", Native_DisconnectBot },
@@ -2234,6 +2312,7 @@ void appendCoreNatives(std::vector<AMX_NATIVE_INFO>& natives)
 		{ "DBR_FindUserByName", Native_FindUserByName },
 		{ "DBR_GetUserID", Native_GetUserId },
 		{ "DBR_GetUserName", Native_GetUserName },
+		{ "DBR_GetUserDiscriminator", Native_GetUserDiscriminator },
 		{ "DBR_IsUserBot", Native_IsUserBot },
 		{ "DBR_IsUserVerified", Native_IsUserVerified },
 
