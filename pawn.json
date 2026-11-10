@@ -1,0 +1,15 @@
+{
+	"supports": ["samp", "openmp"],
+	"plugins": {
+		"windows": "discord-bridge-windows-x86-*.zip",
+		"windows-x64": "discord-bridge-windows-x64-*.zip",
+		"linux": "discord-bridge-linux-x86-static-*.tar.gz",
+		"linux-dynamic": "discord-bridge-linux-x86-dynssl-*.tar.gz",
+		"linux-x64": "discord-bridge-linux-x64-static-*.tar.gz",
+		"linux-x64-dynamic": "discord-bridge-linux-x64-dynssl-*.tar.gz"
+	},
+	"layout": {
+		"samp":   { "plugins": "components/discord-bridge.*", "include": "include" },
+		"openmp": { "components": "components", "include": "include" }
+	}
+}
